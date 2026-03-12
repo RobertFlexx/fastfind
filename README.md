@@ -1,5 +1,7 @@
 # fastfind
 
+## Modern Reimplementation of [GNU Find](https://www.gnu.org/software/findutils/)
+
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Nim](https://img.shields.io/badge/language-Nim-yellow)](https://nim-lang.org/)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20BSD-lightgrey)]()
