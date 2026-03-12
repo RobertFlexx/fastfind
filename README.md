@@ -1,6 +1,6 @@
 # fastfind
 
-## Modern Reimplementation of [GNU Find](https://www.gnu.org/software/findutils/)
+## Modern Reimplementation of [GNU Find](https://www.gnu.org/software/findutils/), or [BSD Find](https://man.freebsd.org/cgi/man.cgi?query=find&manpath=SunOS+5.9).
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Nim](https://img.shields.io/badge/language-Nim-yellow)](https://nim-lang.org/)
