@@ -7,6 +7,23 @@
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20BSD-lightgrey)]()
 
 A fast, feature-rich file search utility written in Nim. Single binary, zero dependencies, cross-platform.
+### Official Aliases (Recommended)
+```
+ffind
+```
+```
+ff
+```
+```
+sfind
+```
+```
+qf
+```
+
+(qf is quickfind, sfind is speed find)
+
+
 
 ## Installation
 
