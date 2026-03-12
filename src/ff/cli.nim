@@ -102,7 +102,7 @@ type
     fdMode*: bool
 
 const
-  Version* = "fastfind 0.1.0"
+  Version* = "fastfind 0.2.0"
 
 proc applyParsedQuery*(cfg: var Config; pq: ParsedQuery)
 proc defaultConfig*(): Config =

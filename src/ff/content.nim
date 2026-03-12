@@ -1,6 +1,5 @@
 # src/ff/content.nim
 import std/[os, strutils, re, memfiles]
-s
 
 proc looksBinary(buf: openArray[char]): bool =
   for ch in buf:
