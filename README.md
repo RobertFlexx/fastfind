@@ -1,6 +1,7 @@
 # fastfind
 
 ## Modern Reimplementation of [GNU Find](https://www.gnu.org/software/findutils/), or [BSD Find](https://man.freebsd.org/cgi/man.cgi?query=find&manpath=SunOS+5.9).
+But now, better than both, and cross platform with 0 dependencies, thanks to Nim.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Nim](https://img.shields.io/badge/language-Nim-yellow)](https://nim-lang.org/)
