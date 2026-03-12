@@ -13,7 +13,7 @@ A fast, feature-rich file search utility written in Nim. Single binary, zero dep
 ### Build from source
 
 ```bash
-git clone https://github.com/yourusername/fastfind
+git clone https://github.com/RobertFlexx/fastfind
 cd fastfind
 nim c -d:release -o:bin/fastfind src/fastfind.nim
 ```
