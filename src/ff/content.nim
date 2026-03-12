@@ -1,5 +1,8 @@
 # src/ff/content.nim
-import std/[os, strutils, re, memfiles]
+import std/[os, strutils, re]
+
+when not defined(openbsd):
+  import std/memfiles
 
 proc looksBinary(buf: openArray[char]): bool =
   for ch in buf:
@@ -33,7 +36,6 @@ proc fileContainsText*(path: string; needle: string; maxBytes: int; allowBinary:
     let chunk = carry & buf[0..<n]
     if chunk.len > 0 and (not allowBinary) and looksBinary(chunk.toOpenArray(0, chunk.len-1)): return false
     if chunk.contains(needle): return true
-    # keep a tail in case needle spans the boundary
     if needle.len <= 1:
       carry = ""
     else:
@@ -66,131 +68,119 @@ proc fileContainsRegex*(path: string; rx: Regex; maxBytes: int; allowBinary: boo
     carry = if keep == 0: "" else: chunk[chunk.len - keep .. ^1]
   false
 
-# memory mapped versions for large files
-
-proc fileContainsTextMmap*(path: string; needle: string; allowBinary: bool; bytesRead: var int64): bool =
-  ## memory mapped version for large file content search
-  ## more efficient for files > 1MB
-  
-  if needle.len == 0: return true
-  
-  var mm: MemFile
-  try:
-    mm = memfiles.open(path, fmRead)
-  except OSError:
-    return false
-  
-  defer: mm.close()
-  
-  let size = mm.size
-  bytesRead = size.int64
-  
-  if size == 0: return false
-  
-  let data = cast[cstring](mm.mem)
-  
-  # check for binary
-  if not allowBinary:
-    # check first 8KB for binary content
-    let checkLen = min(8192, size)
-    if looksBinaryMem(data, checkLen):
-      return false
-  
-  # search for needle using Boyer-Moore-Horspool-like approach (big wurds awhffohpa)
-  let needleLen = needle.len
-  if needleLen == 0: return true
-  if size < needleLen: return false
-  
-  # build skip table
-  var skip: array[256, int]
-  for i in 0 ..< 256:
-    skip[i] = needleLen
-  for i in 0 ..< needleLen - 1:
-    skip[ord(needle[i])] = needleLen - 1 - i
-  
-  var pos = 0
-  while pos <= size - needleLen:
-    var j = needleLen - 1
-    while j >= 0 and data[pos + j] == needle[j]:
-      dec j
+when not defined(openbsd):
+  proc fileContainsTextMmap*(path: string; needle: string; allowBinary: bool; bytesRead: var int64): bool =
+    if needle.len == 0: return true
     
-    if j < 0:
-      return true  # Found
-    
-    pos += skip[ord(data[pos + needleLen - 1])]
-  
-  return false
-
-proc fileContainsRegexMmap*(path: string; rx: Regex; allowBinary: bool; bytesRead: var int64): bool =
-  ## memory mapped regex search
-  ## note: loads entire file content, use with caution on very large files
-  
-  var mm: MemFile
-  try:
-    mm = memfiles.open(path, fmRead)
-  except OSError:
-    return false
-  
-  defer: mm.close()
-  
-  let size = mm.size
-  bytesRead = size.int64
-  
-  if size == 0: return false
-  
-  # for regex, we need to convert to string (not ideal for huge files)
-  # limit to reasonable size
-  if size > 100 * 1024 * 1024:  # 100MB limit for regex
-    return false
-  
-  let data = cast[cstring](mm.mem)
-  
-  if not allowBinary:
-    let checkLen = min(8192, size)
-    if looksBinaryMem(data, checkLen):
+    var mm: MemFile
+    try:
+      mm = memfiles.open(path, fmRead)
+    except OSError:
       return false
-  
-  # convert to string for regex matching
-  var content = newString(size)
-  copyMem(addr content[0], mm.mem, size)
-  
-  return content.contains(rx)
+    
+    defer: mm.close()
+    
+    let size = mm.size
+    bytesRead = size.int64
+    
+    if size == 0: return false
+    
+    let data = cast[cstring](mm.mem)
+    
+    if not allowBinary:
+      let checkLen = min(8192, size)
+      if looksBinaryMem(data, checkLen):
+        return false
+    
+    let needleLen = needle.len
+    if needleLen == 0: return true
+    if size < needleLen: return false
+    
+    var skip: array[256, int]
+    for i in 0 ..< 256:
+      skip[i] = needleLen
+    for i in 0 ..< needleLen - 1:
+      skip[ord(needle[i])] = needleLen - 1 - i
+    
+    var pos = 0
+    while pos <= size - needleLen:
+      var j = needleLen - 1
+      while j >= 0 and data[pos + j] == needle[j]:
+        dec j
+      
+      if j < 0:
+        return true
+      
+      pos += skip[ord(data[pos + needleLen - 1])]
+    
+    return false
 
-# intelligent content search that chooses method based on file size
+  proc fileContainsRegexMmap*(path: string; rx: Regex; allowBinary: bool; bytesRead: var int64): bool =
+    var mm: MemFile
+    try:
+      mm = memfiles.open(path, fmRead)
+    except OSError:
+      return false
+    
+    defer: mm.close()
+    
+    let size = mm.size
+    bytesRead = size.int64
+    
+    if size == 0: return false
+    
+    if size > 100 * 1024 * 1024:
+      return false
+    
+    let data = cast[cstring](mm.mem)
+    
+    if not allowBinary:
+      let checkLen = min(8192, size)
+      if looksBinaryMem(data, checkLen):
+        return false
+    
+    var content = newString(size)
+    copyMem(addr content[0], mm.mem, size)
+    
+    return content.contains(rx)
+
+else:
+  # OpenBSD fallbacks - use streaming versions
+  proc fileContainsTextMmap*(path: string; needle: string; allowBinary: bool; bytesRead: var int64): bool =
+    return fileContainsText(path, needle, 0, allowBinary, bytesRead)
+
+  proc fileContainsRegexMmap*(path: string; rx: Regex; allowBinary: bool; bytesRead: var int64): bool =
+    return fileContainsRegex(path, rx, 0, allowBinary, bytesRead)
+
 proc fileContainsTextSmart*(path: string; needle: string; maxBytes: int; 
                             allowBinary: bool; bytesRead: var int64): bool =
-  ## automatically chooses between streaming and memory mapped search
-  ## based on file size and search parameters
-  
-  let info = getFileInfo(path)
-  let size = info.size
-  
-  # for small files or when maxBytes is set, use streaming
-  if size < 1024 * 1024 or maxBytes > 0:  # < 1MB
+  when defined(openbsd):
     return fileContainsText(path, needle, maxBytes, allowBinary, bytesRead)
-  
-  # for larger files, use memory mapped search
-  return fileContainsTextMmap(path, needle, allowBinary, bytesRead)
+  else:
+    let info = getFileInfo(path)
+    let size = info.size
+    
+    if size < 1024 * 1024 or maxBytes > 0:
+      return fileContainsText(path, needle, maxBytes, allowBinary, bytesRead)
+    
+    return fileContainsTextMmap(path, needle, allowBinary, bytesRead)
 
 proc fileContainsRegexSmart*(path: string; rx: Regex; maxBytes: int;
                              allowBinary: bool; bytesRead: var int64): bool =
-  ## automatically chooses between streaming and memory-mapped regex search
-  
-  let info = getFileInfo(path)
-  let size = info.size
-  
-  # for small files or when maxBytes is set, use streaming
-  if size < 1024 * 1024 or maxBytes > 0:
+  when defined(openbsd):
     return fileContainsRegex(path, rx, maxBytes, allowBinary, bytesRead)
-  
-  # for larger files up to 100MB, try mmap
-  if size < 100 * 1024 * 1024:
-    return fileContainsRegexMmap(path, rx, allowBinary, bytesRead)
-  
-  # for very large files, fall back to streaming
-  return fileContainsRegex(path, rx, maxBytes, allowBinary, bytesRead)
+  else:
+    let info = getFileInfo(path)
+    let size = info.size
+    
+    if size < 1024 * 1024 or maxBytes > 0:
+      return fileContainsRegex(path, rx, maxBytes, allowBinary, bytesRead)
+    
+    if size < 100 * 1024 * 1024:
+      return fileContainsRegexMmap(path, rx, allowBinary, bytesRead)
+    
+    return fileContainsRegex(path, rx, maxBytes, allowBinary, bytesRead)
 
-# grep like line search with line numbers
 type
   LineMatch* = object
     lineNumber*: int
@@ -200,7 +190,6 @@ type
 
 proc grepFile*(path: string; pattern: string; ignoreCase: bool = false;
                maxMatches: int = 100): seq[LineMatch] =
-  ## search file line by line, returning matching lines with line numbers
   result = @[]
   
   var f: File
@@ -227,7 +216,6 @@ proc grepFile*(path: string; pattern: string; ignoreCase: bool = false;
         break
 
 proc grepFileRegex*(path: string; rx: Regex; maxMatches: int = 100): seq[LineMatch] =
-  ## search file with regex, returning matching lines
   result = @[]
   
   var f: File
@@ -243,7 +231,7 @@ proc grepFileRegex*(path: string; rx: Regex; maxMatches: int = 100): seq[LineMat
       var bounds: tuple[first, last: int] = (0, 0)
       let m = line.find(rx)
       if m != -1:
-        bounds = (m, m + 1)  # approximate
+        bounds = (m, m + 1)
       
       result.add(LineMatch(
         lineNumber: lineNum,
