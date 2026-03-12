@@ -102,7 +102,7 @@ type
     fdMode*: bool
 
 const
-  Version* = "fastfind 0.2.0"
+  Version* = "fastfind 0.2.1"
 
 proc applyParsedQuery*(cfg: var Config; pq: ParsedQuery)
 proc defaultConfig*(): Config =
@@ -730,7 +730,10 @@ proc parseCli*(args: seq[string]): Config =
      not result.interactiveMode and result.naturalQuery.len == 0 and
      result.searchFunction.len == 0 and result.searchClass.len == 0 and
      result.searchSymbol.len == 0 and
-     not (result.gitModified or result.gitUntracked or result.gitTracked or result.gitChanged):
+     not (result.gitModified or result.gitUntracked or result.gitTracked or result.gitChanged) and
+     not (result.minSize >= 0 or result.maxSize >= 0 or
+          result.newerThan.isSome or result.olderThan.isSome or
+          result.containsText.len > 0 or result.containsRegex.len > 0):
     niceError("missing <pattern>")
     printHelp()
     quit(2)
@@ -738,6 +741,8 @@ proc parseCli*(args: seq[string]): Config =
   # allow git/semantic filters without explicit pattern
   if result.patterns.len == 0:
     if result.gitModified or result.gitUntracked or result.gitTracked or result.gitChanged:
+      result.patterns = @["*"]
+    if result.minSize >= 0 or result.maxSize >= 0 or result.newerThan.isSome or result.olderThan.isSome or result.containsText.len > 0 or result.containsRegex.len > 0:
       result.patterns = @["*"]
     if result.searchFunction.len > 0 or result.searchClass.len > 0 or result.searchSymbol.len > 0:
       result.patterns = @["*"]
