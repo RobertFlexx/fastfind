@@ -3,6 +3,9 @@
 ## Modern Reimplementation of [GNU Find](https://www.gnu.org/software/findutils/), or [BSD Find](https://man.freebsd.org/cgi/man.cgi?query=find&apropos=0&sektion=0&manpath=FreeBSD+16.0-CURRENT&format=html).
 But now, better than both, and cross platform with 0 dependencies, thanks to Nim.
 
+### (SOFTWARE IS NOT MATURE, BUGS ARE A HUGE PROBABILITY.)
+
+
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Nim](https://img.shields.io/badge/language-Nim-yellow)](https://nim-lang.org/)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20BSD-lightgrey)]()
