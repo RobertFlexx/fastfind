@@ -219,7 +219,7 @@ Notes:
 
 fastfind also supports semantic-style symbol discovery directly from the CLI.
 
-Find function definitions:
+Run these inside a project directory:
 
 ```
 ff --function parse .
