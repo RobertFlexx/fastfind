@@ -105,11 +105,11 @@ ff "*.nim" src/
 # Fuzzy match
 ff --fuzzy config src/
 
-# Recent files with content
-ff "*.py" --changed 24h --contains TODO
+# Content search
+ff "*.py" --contains TODO
 
 # Natural language query
-ff "python files containing TODO" src/
+ff "python files containing TODO"
 
 # Interactive mode
 ff --interactive
@@ -222,19 +222,19 @@ fastfind also supports semantic-style symbol discovery directly from the CLI.
 Find function definitions:
 
 ```
-ff --function parse src/
+ff --function parse .
 ```
 
 Find classes:
 
 ```
-ff --class Parser src/
+ff --class Parser .
 ```
 
 Find symbols:
 
 ```
-ff --symbol Config src/
+ff --symbol Config .
 ```
 
 This allows basic code discovery without launching a language server.
