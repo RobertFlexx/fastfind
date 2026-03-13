@@ -1,9 +1,35 @@
 # fastfind
 
+## fastfind in action
+
+Find Nim files:
+
+```
+ff "*.nim"
+```
+
+Find Python files changed in the last day containing TODO:
+
+```
+ff "*.py" --changed 1d --contains TODO
+```
+
+Interactive fuzzy search:
+
+```
+ff --interactive
+```
+
+---
+
 ## Modern replacement of `find`, focused on speed and sane defaults.
+
 Cross-platform, single binary, zero runtime dependencies (written in Nim).
 
 ### (SOFTWARE IS NOT MATURE, EXPECT BUGS!)
+
+⚠ fastfind is still early in development.
+Expect occasional bugs or behavioral changes.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Nim](https://img.shields.io/badge/language-Nim-yellow)](https://nim-lang.org/)
@@ -29,12 +55,17 @@ Official aliases (recommended):
 
 ## Installation
 
-### Install latest published binary with
+### Quick install
+
+Install latest published binary with
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/RobertFlexx/fastfind/main/install.sh | bash
 ```
 
-### Build from source
+* DISCLAIMER: binaries for other OSes, or musl libc Linux distributions may not ALWAYS be available. Primarily glibc Linux with architecture x86_64.
+
+### Or build from source
 
 ```bash
 git clone https://github.com/RobertFlexx/fastfind
@@ -51,6 +82,21 @@ sudo cp bin/fastfind /usr/local/bin/ff
 ```
 
 ## Quick start
+
+## Natural language queries (BETA)
+
+`fastfind` can interpret simple natural language queries and translate them into filters automatically.
+
+Examples:
+
+```bash
+ff "python files containing TODO"
+ff "large log files modified today"
+ff "config files bigger than 10MB"
+```
+
+⚠ This feature is currently experimental and may change in future releases.
+
 
 ```bash
 # Find Nim files
@@ -81,38 +127,48 @@ ff --interactive
 
 `fastfind` sits between these: one command with richer features, while keeping command shape compact.
 
+fastfind aims to combine the strengths of several tools:
+
+* `find`: extremely powerful but complex
+* `fd`: simple and fast but limited scope
+* `fzf`: great interactive filtering but requires input pipelines
+
+fastfind provides:
+
+* a single consistent command
+* built-in fuzzy and content search
+* interactive mode
+* semantic code queries
+* optional indexed search
+
 ## Comparison: `ff` vs `find` vs `fd` vs `fzf`
 
 ### Ability and feature depth
 
-| Capability | `ff` | `find` | `fd` | `fzf` |
-| --- | --- | --- | --- | --- |
-| Recursive file discovery | Built-in | Built-in | Built-in | Input-driven (needs producer) |
-| Glob/regex/literal modes | Built-in switches | Primarily `-name`/`-regex` forms | Built-in regex/glob modes | Fuzzy/text filtering over input |
-| Fuzzy matching | Built-in (`--fuzzy`) | No | No | Core strength |
-| Size/time filters | Built-in (`--size`, `--changed`, etc.) | Built-in (`-size`, `-mtime`, etc.) | Built-in (`--size`, `--changed-within`) | Via upstream command only |
-| Content filtering | Built-in (`--contains`) | Via `-exec grep`/pipeline | Via `-X grep`/pipeline | Via upstream command only |
-| Git-aware file filters | Built-in (`--git-*`) | No | Partial (`--no-ignore-vcs`, etc.) | No |
-| Interactive picker | Built-in (`--interactive`, `--select`) | No | No | Core strength |
-| Index mode | Built-in (`--use-index`) | No | No | No |
-| Semantic symbol search | Built-in (`--function`, `--class`, `--symbol`) | No | No | No |
+| Capability               | `ff`                                           | `find`                             | `fd`                                    | `fzf`                           |
+| ------------------------ | ---------------------------------------------- | ---------------------------------- | --------------------------------------- | ------------------------------- |
+| Recursive file discovery | Built-in                                       | Built-in                           | Built-in                                | Input-driven (needs producer)   |
+| Glob/regex/literal modes | Built-in switches                              | Primarily `-name`/`-regex` forms   | Built-in regex/glob modes               | Fuzzy/text filtering over input |
+| Fuzzy matching           | Built-in (`--fuzzy`)                           | No                                 | No                                      | Core strength                   |
+| Size/time filters        | Built-in (`--size`, `--changed`, etc.)         | Built-in (`-size`, `-mtime`, etc.) | Built-in (`--size`, `--changed-within`) | Via upstream command only       |
+| Content filtering        | Built-in (`--contains`)                        | Via `-exec grep`/pipeline          | Via `-X grep`/pipeline                  | Via upstream command only       |
+| Git-aware file filters   | Built-in (`--git-*`)                           | No                                 | Partial (`--no-ignore-vcs`, etc.)       | No                              |
+| Interactive picker       | Built-in (`--interactive`, `--select`)         | No                                 | No                                      | Core strength                   |
+| Index mode               | Built-in (`--use-index`)                       | No                                 | No                                      | No                              |
+| Semantic symbol search   | Built-in (`--function`, `--class`, `--symbol`) | No                                 | No                                      | No                              |
 
 ### Ease of use (common tasks)
 
-| Task | `ff` | `find` | `fd` | `fzf` |
-| --- | --- | --- | --- | --- |
-| Find all `*.nim` files | `ff "*.nim"` | `find . -type f -name '*.nim'` | `fd --glob '*.nim'` | `find . -type f \| fzf --filter '.nim'` |
-| Files changed in 1 day | `ff "*.nim" --changed 1d` | `find . -type f -name '*.nim' -mtime -1` | `fd --changed-within 1day --glob '*.nim'` | `find ... -mtime -1 \| fzf --filter '.nim'` |
-| Find files containing TODO | `ff "*.py" --contains TODO` | `find ... -exec grep -l TODO {} +` | `fd --glob '*.py' -X grep -l TODO` | `find ... \| xargs grep -l TODO \| fzf` |
+| Task                       | `ff`                        | `find`                                   | `fd`                                      | `fzf`                                       |
+| -------------------------- | --------------------------- | ---------------------------------------- | ----------------------------------------- | ------------------------------------------- |
+| Find all `*.nim` files     | `ff "*.nim"`                | `find . -type f -name '*.nim'`           | `fd --glob '*.nim'`                       | `find . -type f \| fzf --filter '.nim'`     |
+| Files changed in 1 day     | `ff "*.nim" --changed 1d`   | `find . -type f -name '*.nim' -mtime -1` | `fd --changed-within 1day --glob '*.nim'` | `find ... -mtime -1 \| fzf --filter '.nim'` |
+| Find files containing TODO | `ff "*.py" --contains TODO` | `find ... -exec grep -l TODO {} +`       | `fd --glob '*.py' -X grep -l TODO`        | `find ... \| xargs grep -l TODO \| fzf`     |
 
-Short version:
+## Performance and speed
 
-* `find`: extremely low level, highest syntax overhead.
-* `fd`: easiest for common name/path filters.
-* `fzf`: best interactive selector when you already have an input stream.
-* `ff`: broad feature set in one tool.
-
-### Performance and speed
+fastfind is typically **10–30% faster than fd** in common filename searches,
+and significantly faster for content filters due to built-in scanning.
 
 All measurements below were run by executing commands repeatedly on the same local dataset.
 
@@ -132,32 +188,56 @@ System specs:
 
 #### Filename glob benchmark (`*.nim`, 15 runs, lower is better)
 
-| Tool | Mean (ms) | Median (ms) | Std Dev (ms) |
-| --- | ---: | ---: | ---: |
-| `ff '*.nim' .benchdata` | 8.89 | 8.60 | 1.37 |
-| `fd --glob '*.nim' .benchdata` | 9.97 | 9.37 | 2.10 |
-| `find .benchdata -type f -name '*.nim'` | 13.01 | 12.69 | 1.03 |
+| Tool                                    | Mean (ms) | Median (ms) | Std Dev (ms) |
+| --------------------------------------- | --------: | ----------: | -----------: |
+| `ff '*.nim' .benchdata`                 |      8.89 |        8.60 |         1.37 |
+| `fd --glob '*.nim' .benchdata`          |      9.97 |        9.37 |         2.10 |
+| `find .benchdata -type f -name '*.nim'` |     13.01 |       12.69 |         1.03 |
 
 #### Substring name benchmark (`config`, 15 runs)
 
-| Tool | Mean (ms) | Median (ms) | Std Dev (ms) |
-| --- | ---: | ---: | ---: |
-| `ff --fixed config .benchdata` | 7.32 | 7.22 | 1.14 |
-| `fd 'config' .benchdata` | 9.14 | 9.18 | 0.81 |
-| `find .benchdata -type f -name '*config*'` | 12.51 | 12.57 | 0.78 |
-| `find ... \| fzf --filter config` | 13.56 | 13.48 | 1.28 |
+| Tool                                       | Mean (ms) | Median (ms) | Std Dev (ms) |
+| ------------------------------------------ | --------: | ----------: | -----------: |
+| `ff --fixed config .benchdata`             |      7.32 |        7.22 |         1.14 |
+| `fd 'config' .benchdata`                   |      9.14 |        9.18 |         0.81 |
+| `find .benchdata -type f -name '*config*'` |     12.51 |       12.57 |         0.78 |
+| `find ... \| fzf --filter config`          |     13.56 |       13.48 |         1.28 |
 
 #### Time/content filters (12 runs)
 
-| Task | `ff` mean (ms) | `fd` mean (ms) | `find` mean (ms) |
-| --- | ---: | ---: | ---: |
-| Mtime (`*.nim` in last day) | 9.05 | 10.37 | 15.18 |
-| Content (`TODO` in `*.py`) | 9.27 (`--contains`) | 18.73 (`fd ... -X grep`) | 22.75 (`find ... -exec grep`) |
+| Task                        |      `ff` mean (ms) |           `fd` mean (ms) |              `find` mean (ms) |
+| --------------------------- | ------------------: | -----------------------: | ----------------------------: |
+| Mtime (`*.nim` in last day) |                9.05 |                    10.37 |                         15.18 |
+| Content (`TODO` in `*.py`)  | 9.27 (`--contains`) | 18.73 (`fd ... -X grep`) | 22.75 (`find ... -exec grep`) |
 
 Notes:
 
 * `fzf` is very fast at filtering, but it needs a producer command (`find`, `fd`, etc.).
 * These are warm-cache local numbers. Run your own benchmarks to make your choice.
+
+## Semantic code search
+
+fastfind also supports semantic-style symbol discovery directly from the CLI.
+
+Find function definitions:
+
+```
+ff --function parse src/
+```
+
+Find classes:
+
+```
+ff --class Parser src/
+```
+
+Find symbols:
+
+```
+ff --symbol Config src/
+```
+
+This allows basic code discovery without launching a language server.
 
 ## Use cases
 
@@ -184,15 +264,15 @@ ff "<natural language query>" [path ...]
 
 ### High-value flags
 
-| Area | Flags |
-| --- | --- |
-| Match mode | `--glob`, `--regex`, `--fixed`, `--fuzzy` |
-| Path mode | `--name`, `--full-path`, `--full-match` |
-| Traversal | `-H`, `-L`, `-x`, `--gitignore`, `--max-depth`, `-j` |
-| Filters | `--type`, `--size`, `--changed`, `--contains`, `--exclude` |
-| Git | `--git-modified`, `--git-untracked`, `--git-tracked`, `--git-changed` |
-| Output | `--long`, `--json`, `--ndjson`, `--table`, `--sort`, `--limit`, `--stats` |
-| Interactive/index | `--interactive`, `--select`, `--use-index`, `--rebuild-index` |
+| Area              | Flags                                                                     |
+| ----------------- | ------------------------------------------------------------------------- |
+| Match mode        | `--glob`, `--regex`, `--fixed`, `--fuzzy`                                 |
+| Path mode         | `--name`, `--full-path`, `--full-match`                                   |
+| Traversal         | `-H`, `-L`, `-x`, `--gitignore`, `--max-depth`, `-j`                      |
+| Filters           | `--type`, `--size`, `--changed`, `--contains`, `--exclude`                |
+| Git               | `--git-modified`, `--git-untracked`, `--git-tracked`, `--git-changed`     |
+| Output            | `--long`, `--json`, `--ndjson`, `--table`, `--sort`, `--limit`, `--stats` |
+| Interactive/index | `--interactive`, `--select`, `--use-index`, `--rebuild-index`             |
 
 ### More examples
 
@@ -247,9 +327,9 @@ Please read [`CONTRIBUTING.md`](CONTRIBUTING.md) first.
 
 ## Security
 
+Wanna talk privately? email me at: [robertflexxgh@gmail.com](mailto:robertflexxgh@gmail.com)
 Please report vulnerabilities using [`SECURITY.md`](SECURITY.md).
 
 ## License
 
 MIT License. See [`LICENSE`](LICENSE).
-
