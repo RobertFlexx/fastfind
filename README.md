@@ -34,7 +34,7 @@ Official aliases (recommended):
 curl -fsSL https://raw.githubusercontent.com/RobertFlexx/fastfind/main/install.sh | bash
 ```
 
-### Build from source
+### Or build from source
 
 ```bash
 git clone https://github.com/RobertFlexx/fastfind
