@@ -22,6 +22,10 @@ type
     fuzzyScore*: int       ## lower is better (for fuzzy matching)
     lineNumber*: int       ## for semantic search results
 
+  SearchResult* = object
+    matches*: seq[MatchResult]
+    stats*: Stats
+
   Stats* = object
     visited*: int
     visitedFiles*: int
@@ -34,21 +38,21 @@ type
     startTime*: Time
     endTime*: Time
 
-proc isHiddenName*(name: string): bool =
+proc isHiddenName*(name: string): bool {.inline.} =
   name.len > 0 and name[0] == '.' and name != "." and name != ".."
 
-proc kindFromPathComponent*(k: PathComponent): EntryType =
+proc kindFromPathComponent*(k: PathComponent): EntryType {.inline.} =
   case k
   of pcFile, pcLinkToFile: etFile
   of pcDir, pcLinkToDir: etDir
 
-proc entryTypeFromWalk*(k: PathComponent): EntryType =
+proc entryTypeFromWalk*(k: PathComponent): EntryType {.inline.} =
   case k
   of pcFile: etFile
   of pcDir: etDir
   of pcLinkToFile, pcLinkToDir: etLink
 
-proc safeRelPath*(p, root: string): string =
+proc safeRelPath*(p, root: string): string {.inline.} =
   try:
     result = relativePath(p, root)
   except CatchableError:

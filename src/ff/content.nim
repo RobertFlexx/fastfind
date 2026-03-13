@@ -228,10 +228,7 @@ proc grepFileRegex*(path: string; rx: Regex; maxMatches: int = 100): seq[LineMat
     inc lineNum
     
     if line.contains(rx):
-      var bounds: tuple[first, last: int] = (0, 0)
-      let m = line.find(rx)
-      if m != -1:
-        bounds = (m, m + 1)
+      let bounds = findBounds(line, rx)
       
       result.add(LineMatch(
         lineNumber: lineNum,

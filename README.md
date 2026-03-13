@@ -44,6 +44,11 @@ nim c -d:release -o:bin/fastfind src/fastfind.nim
 ```bash
 nim c -d:release --threads:on -o:bin/fastfind src/fastfind.nim
 ```
+### (Recommended!) fully optimized build
+
+```bash
+nim c -d:danger -d:release --mm:arc --threads:on -d:lto --opt:speed --passC:-O3 --passC:-march=native --passC:-flto --passL:-flto --passL:-s -o:ff src/ff.nim
+```
 
 ### Install to PATH
 

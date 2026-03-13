@@ -1,75 +1,67 @@
-# src/ff/fuzzy_match.nim
-## lightweight fuzzy matching with scoring
-## lower scores are better
-
-import std/strutils
+## Optimized fuzzy matching - lower scores are better
 
 proc fuzzyMatch*(pattern: string; text: string): int =
-  ## reutrns match score (lower is better), or -1 if no match
-  ## scoring favors:
-  ## - contiguous matches
-  ## - matches at word boundaries
-  ## - shorter overall distance
-  
   if pattern.len == 0: return 0
   if text.len == 0: return -1
+  if pattern.len > text.len: return -1
+  
+  # quick char existence check for short patterns (quack)
+  if pattern.len <= 5:
+      for pc in pattern:
+        var found = false
+        for tc in text:
+          if tc == pc:
+            found = true
+            break
+        if not found: return -1
   
   var patIdx = 0
   var textIdx = 0
   var score = 0
   var lastMatchIdx = -1
-  var consecutiveMatches = 0
+  let textLen = text.len
+  let patLen = pattern.len
   
-  while textIdx < text.len and patIdx < pattern.len:
+  while textIdx < textLen:
+    if textLen - textIdx < patLen - patIdx:
+      return -1
+    
     if text[textIdx] == pattern[patIdx]:
-      # match found
       if lastMatchIdx >= 0:
         let gap = textIdx - lastMatchIdx - 1
         if gap == 0:
-          # consecutive match, bonus
-          inc consecutiveMatches
           score -= 2
         else:
-          # gap penalty
           score += gap
-          consecutiveMatches = 0
       
-      # word boundary bonus
-      if textIdx == 0 or text[textIdx - 1] in ['/', '_', '-', ' ', '.']:
+      if textIdx == 0:
         score -= 5
-      
-      # u[percase after lowercase bonus (camelCase)
-      if textIdx > 0 and text[textIdx].isUpperAscii and text[textIdx - 1].isLowerAscii:
-        score -= 3
+      else:
+        let prev = text[textIdx - 1]
+        if prev == '/' or prev == '_' or prev == '-' or prev == ' ' or prev == '.':
+          score -= 5
+        elif text[textIdx] in {'A'..'Z'} and prev in {'a'..'z'}:
+          score -= 3
       
       lastMatchIdx = textIdx
       inc patIdx
+      if patIdx >= patLen: break
     
     inc textIdx
   
-  if patIdx < pattern.len:
-    # didnt match all pattern chars
-    return -1
+  if patIdx < patLen: return -1
   
-  # depth penalty (count directory separators)
-  var depth = 0
   for ch in text:
-    if ch == '/': inc depth
-  score += depth * 3
+    if ch == '/': score += 3
+  score += text.len shr 2
   
-  # length penalty (favor shorter paths)
-  score += text.len div 4
-  
-  result = max(0, score)
+  if score < 1: 1 else: score
 
 proc fuzzyMatchMulti*(patterns: seq[string]; text: string): tuple[matched: bool, score: int] =
-  ## match against multiple patterns, return best score
   result.matched = false
   result.score = 999999
-  
   for pat in patterns:
     let s = fuzzyMatch(pat, text)
     if s >= 0:
       result.matched = true
-      if s < result.score:
-        result.score = s
+      if s < result.score: result.score = s

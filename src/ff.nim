@@ -227,7 +227,9 @@ when isMainModule:
       applyGitFilters(cfg, matches)
 
     if matches.len == 0:
-      if pat0.len > 0:
+      if cfg.naturalQuery.len > 0:
+        printNoMatchesNL(cfg.naturalQuery, if cfg.paths.len > 0: cfg.paths[0] else: ".")
+      elif pat0.len > 0:
         printNoMatchesHint(pat0, modeStr(cfg))
       emitStatsIfNeeded(cfg, res.stats)
       quit(1)
@@ -266,7 +268,9 @@ when isMainModule:
     )
 
     if matched == 0:
-      if pat0.len > 0:
+      if cfg.naturalQuery.len > 0:
+        printNoMatchesNL(cfg.naturalQuery, if cfg.paths.len > 0: cfg.paths[0] else: ".")
+      elif pat0.len > 0:
         printNoMatchesHint(pat0, modeStr(cfg))
       emitStatsIfNeeded(cfg, stats)
       quit(1)

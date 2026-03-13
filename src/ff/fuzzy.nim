@@ -1,5 +1,5 @@
 # src/ff/fuzzy.nim
-import std/[strutils, sequtils, algorithm]
+import std/[strutils, sequtils, algorithm, os]
 
 type
   Suggestion* = object
@@ -64,3 +64,9 @@ proc printNoMatchesHint*(pattern: string; mode: string) =
     stderr.writeLine("Tip: if you meant a glob like *.rb, remove --fixed (glob is default).")
   else:
     discard
+
+proc printNoMatchesNL*(humanDesc: string; path: string) =
+  let loc = if path == "." or path == "": "current directory"
+            elif path == "~" or path == getHomeDir().strip(chars = {'/'}): "home directory"
+            else: "'" & path & "'"
+  stderr.writeLine("fastfind: no " & humanDesc & " found in " & loc)
