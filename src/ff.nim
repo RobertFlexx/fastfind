@@ -252,12 +252,6 @@ when isMainModule:
     else:
       emitResults(cfg, matches, res.stats)
 
-      if cfg.execCmd.len > 0:
-        var worst = 0
-        for m in matches:
-          let code = runExec(cfg, m)
-          if code != 0: worst = code
-        if worst != 0: quit(worst)
 
   else:
     var matched = 0

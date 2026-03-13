@@ -318,6 +318,10 @@ proc helpText(useColor: bool): string =
   result.add("  " & C("--git-untracked") & "     Only untracked files\n")
   result.add("  " & C("--git-tracked") & "       Only tracked files\n")
   result.add("  " & C("--git-changed") & "       Modified or untracked\n\n")
+  result.add(B("Code") & ":\n")
+  result.add("  " & C("--function") & " NAME     Find function definitions\n")
+  result.add("  " & C("--class") & " NAME        Find class definitions\n")
+  result.add("  " & C("--symbol") & " NAME       Find symbol definitions\n\n")
   
   result.add(B("Output") & ":\n")
   result.add("  " & C("-l") & ", " & C("--long") & "        Long format\n")
@@ -327,7 +331,8 @@ proc helpText(useColor: bool): string =
   result.add("  " & C("-r") & ", " & C("--reverse") & "     Reverse sort\n")
   result.add("  " & C("--limit") & " N           Limit results\n")
   result.add("  " & C("-c") & ", " & C("--count") & "       Count only\n")
-  result.add("  " & C("--stats") & "             Show statistics\n\n")
+  result.add("  " & C("--stats") & "             Show statistics\n")
+  result.add("  " & C("--exec") & " CMD          Execute CMD for each match ({} = path)\n\n")
   
   result.add(B("Interactive") & ":\n")
   result.add("  " & C("--interactive") & "       Live search UI\n")

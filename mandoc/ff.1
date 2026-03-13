@@ -1,0 +1,268 @@
+.TH FASTFIND 1 "March 2026" "fastfind" "User Commands"
+
+.SH NAME
+fastfind - fast recursive file search tool
+
+.SH SYNOPSIS
+.B fastfind
+[\fIOPTIONS\fR] \fIPATTERN\fR [\fIPATH\fR ...]
+
+.B fastfind
+"\fInatural language query\fR"
+
+.SH DESCRIPTION
+.B fastfind
+is a fast file searching tool designed for quickly locating files,
+directories, and code symbols. It supports glob patterns, regular
+expressions, fuzzy matching, and content searching.
+
+Results can be filtered by file type, size, time, and Git status.
+Commands may also be executed for each match using the
+.B --exec
+option.
+
+.SH PATTERN MODES
+.TP
+.B --glob
+Match using glob patterns (default).
+
+.TP
+.B --regex
+Match using regular expressions.
+
+.TP
+.B --fixed
+Literal substring match.
+
+.TP
+.B --fuzzy
+Fuzzy matching against filenames.
+
+.TP
+.B --name
+Match against basename only (default).
+
+.TP
+.B --full-path
+Match against the full file path.
+
+.TP
+.B -i, --ignore-case
+Case insensitive matching.
+
+.TP
+.B --smart-case
+Case insensitive unless the pattern contains uppercase characters.
+
+.SH TRAVERSAL
+.TP
+.B -H, --hidden
+Include hidden files.
+
+.TP
+.B -L, --follow
+Follow symbolic links.
+
+.TP
+.B -x, --one-file-system
+Do not cross filesystem boundaries.
+
+.TP
+.B --gitignore
+Respect .gitignore rules.
+
+.TP
+.B --min-depth N
+Minimum traversal depth.
+
+.TP
+.B --max-depth N
+Maximum traversal depth.
+
+.TP
+.B -j, --threads N
+Number of parallel search threads.
+
+.SH FILTERS
+.TP
+.B -t, --type TYPE
+Filter by type: f (file), d (directory), l (symlink).
+
+.TP
+.B --size EXPR
+Filter by file size (e.g. >10M, 10K..5M).
+
+.TP
+.B --newer TIME
+Only files newer than the given timestamp.
+
+.TP
+.B --older TIME
+Only files older than the given timestamp.
+
+.TP
+.B --changed DUR
+Files modified within the given duration.
+
+.TP
+.B --recent
+Files modified within the last 24 hours.
+
+.TP
+.B --contains TEXT
+Search file contents for TEXT.
+
+.TP
+.B --exclude PATTERN
+Exclude paths matching the pattern.
+
+.SH GIT FILTERS
+.TP
+.B --git-modified
+Show only modified files.
+
+.TP
+.B --git-untracked
+Show only untracked files.
+
+.TP
+.B --git-tracked
+Show only tracked files.
+
+.TP
+.B --git-changed
+Show modified or untracked files.
+
+.SH CODE SEARCH
+.TP
+.B --function NAME
+Find function definitions matching NAME.
+
+.TP
+.B --class NAME
+Find class definitions matching NAME.
+
+.TP
+.B --symbol NAME
+Find symbol definitions.
+
+.SH OUTPUT
+.TP
+.B -l, --long
+Show extended file information.
+
+.TP
+.B --json
+Output results as JSON.
+
+.TP
+.B --absolute
+Print absolute paths.
+
+.TP
+.B --sort KEY
+Sort results by path, name, size, or time.
+
+.TP
+.B -r, --reverse
+Reverse sort order.
+
+.TP
+.B --limit N
+Limit the number of results.
+
+.TP
+.B -c, --count
+Only print the number of matches.
+
+.TP
+.B --stats
+Display search statistics.
+
+.TP
+.B --exec CMD
+Execute a command for each match. The placeholder
+.B {}
+is replaced with the file path.
+
+.SH INTERACTIVE MODE
+.TP
+.B --interactive
+Start a live interactive search interface.
+
+.TP
+.B --select
+Interactively select results.
+
+.SH INDEX
+.TP
+.B --use-index
+Search using a cached index.
+
+.TP
+.B --rebuild-index
+Rebuild the index.
+
+.TP
+.B --index-status
+Show index information.
+
+.SH MISC
+.TP
+.B -h, --help
+Show help.
+
+.TP
+.B --version
+Show version information.
+
+.TP
+.B -v, --verbose
+Verbose output.
+
+.TP
+.B -q, --quiet-errors
+Suppress error messages.
+
+.SH EXAMPLES
+Find Rust files in a source directory:
+
+.nf
+fastfind "*.rs" src/
+.fi
+
+Search for files containing TODO:
+
+.nf
+fastfind --contains "TODO"
+.fi
+
+Execute a command on each match:
+
+.nf
+fastfind "*.log" --exec "gzip {}"
+.fi
+
+Find recently modified files:
+
+.nf
+fastfind --recent
+.fi
+
+Search for a function definition:
+
+.nf
+fastfind --function main
+.fi
+
+Use fuzzy matching:
+
+.nf
+fastfind --fuzzy config
+.fi
+
+.SH SEE ALSO
+fd(1), rg(1), find(1)
+
+.SH AUTHOR
+Robert Flexx
