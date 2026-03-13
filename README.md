@@ -29,6 +29,11 @@ Official aliases (recommended):
 
 ## Installation
 
+### Install latest published binary with
+```bash
+curl -fsSL https://raw.githubusercontent.com/RobertFlexx/fastfind/main/install.sh | bash
+```
+
 ### Build from source
 
 ```bash
