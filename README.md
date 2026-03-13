@@ -38,6 +38,7 @@ Expect occasional bugs or behavioral changes.
 `fastfind`/`ff` is a fast file finder with:
 
 * Glob/regex/fixed/fuzzy matching
+* Natural language queries (BETA)
 * Size/time/content filters
 * Git-aware filtering
 * Interactive mode
@@ -83,21 +84,6 @@ sudo cp bin/fastfind /usr/local/bin/ff
 
 ## Quick start
 
-## Natural language queries (BETA)
-
-`fastfind` can interpret simple natural language queries and translate them into filters automatically.
-
-Examples:
-
-```bash
-ff "python files containing TODO"
-ff "large log files modified today"
-ff "config files bigger than 10MB"
-```
-
-⚠ This feature is currently experimental and may change in future releases.
-
-
 ```bash
 # Find Nim files
 ff "*.nim" src/
@@ -114,6 +100,20 @@ ff "python files containing TODO"
 # Interactive mode
 ff --interactive
 ```
+
+## Natural language queries (BETA)
+
+`fastfind` can interpret simple natural language queries and translate them into filters automatically.
+
+Examples:
+
+```bash
+ff "python files containing TODO"
+ff "large log files modified today"
+ff "config files bigger than 10MB"
+```
+
+⚠ This feature is currently experimental and may change in future releases.
 
 > for more documentation, use `man ff` (or whatever alias you're using) in the terminal.
 
@@ -150,6 +150,7 @@ fastfind provides:
 | Recursive file discovery | Built-in                                       | Built-in                           | Built-in                                | Input-driven (needs producer)   |
 | Glob/regex/literal modes | Built-in switches                              | Primarily `-name`/`-regex` forms   | Built-in regex/glob modes               | Fuzzy/text filtering over input |
 | Fuzzy matching           | Built-in (`--fuzzy`)                           | No                                 | No                                      | Core strength                   |
+| Natural language queries | Built-in (BETA)                                | No                                 | No                                      | No                              |
 | Size/time filters        | Built-in (`--size`, `--changed`, etc.)         | Built-in (`-size`, `-mtime`, etc.) | Built-in (`--size`, `--changed-within`) | Via upstream command only       |
 | Content filtering        | Built-in (`--contains`)                        | Via `-exec grep`/pipeline          | Via `-X grep`/pipeline                  | Via upstream command only       |
 | Git-aware file filters   | Built-in (`--git-*`)                           | No                                 | Partial (`--no-ignore-vcs`, etc.)       | No                              |
@@ -221,6 +222,8 @@ fastfind also supports semantic-style symbol discovery directly from the CLI.
 
 Run these inside a project directory:
 
+Find function definitions:
+
 ```
 ff --function parse .
 ```
@@ -277,14 +280,14 @@ ff "<natural language query>" [path ...]
 ### More examples
 
 ```bash
-# Big logs, newest first
-ff "*.log" --size ">100M" --sort time --reverse
+# Recent logs, newest first
+ff "*.log" --sort time --reverse
 
-# Changed Python files tracked by git
-ff "*.py" --git-modified --changed 7d
+# Changed Python files in the current directory tree
+ff "*.py" --changed 7d .
 
-# Symbol search
-ff --function parse src/
+# Symbol search inside a project
+ff --function parse .
 
 # Interactive select, then open with editor
 ff "*.nim" --select --exec "vim {}"
