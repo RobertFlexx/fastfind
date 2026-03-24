@@ -63,6 +63,10 @@ Install latest published binary with
 ```bash
 curl -fsSL https://raw.githubusercontent.com/RobertFlexx/fastfind/main/install.sh | bash
 ```
+For some BSDs or Linux Distributions:
+```bash
+curl -fsSL https://raw.githubusercontent.com/RobertFlexx/fastfind/main/install.sh | sh
+```
 
 * DISCLAIMER: binaries for other OSes, or musl libc Linux distributions may not ALWAYS be available. Primarily glibc Linux with architecture x86_64.
 
