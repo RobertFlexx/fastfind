@@ -69,7 +69,7 @@ curl -fsSL https://raw.githubusercontent.com/RobertFlexx/fastfind/main/install.s
 ```
 
 * DISCLAIMER: binaries for other OSes, or musl libc Linux distributions may not ALWAYS be available. Primarily glibc Linux with architecture x86_64.
-
+* HINT: there are dynamic binaries for: FreeBSD[amd64], OpenBSD[amd64], NetBSD[amd64], Darwin[arm64]
 ### Or build from source
 
 ```bash
