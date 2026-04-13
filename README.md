@@ -32,6 +32,7 @@ Cross-platform, single binary, zero runtime dependencies (written in Nim).
 Expect occasional bugs or behavioral changes.
 
 > Below is software supported, and software used in this project. click on any to be redirected to respected website.
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-1f6feb?style=for-the-badge)](LICENSE)
 [![Language: Nim](https://img.shields.io/badge/Language-Nim-FFC200?style=for-the-badge&logo=nim&logoColor=black)](https://nim-lang.org/)
 [![Linux](https://img.shields.io/badge/Linux-Supported-2ea44f?style=for-the-badge&logo=linux&logoColor=white)](https://www.kernel.org/)
