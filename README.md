@@ -96,7 +96,7 @@ nim c -d:danger -d:release --mm:orc --threads:on -d:lto --opt:speed \
 | `--passL:-flto` | Linker LTO | ✅ Required |
 | `--passL:-s` | Strip symbols (smaller binary) | Optional |
 
-#### Build for Different Systems
+#### Build for Different Systems (COMPILE WITH THREADS ON FOR FULL PERFORMANCE)
 
 **For distribution, very optimized build (generic binary):**
 ```bash
