@@ -1,6 +1,8 @@
 import std/[os, strutils, parseopt, times, tables, options, cpuinfo]
 import ansi, core, matchers, units, fuzzy, nlp
 
+proc spaces(n: int): string {.inline.} = repeat(' ', n)
+
 type
   IndexCommand* = enum
     icNone, icRebuild, icStatus, icDaemon
@@ -74,7 +76,7 @@ type
     fdMode*: bool
 
 const
-  Version* = "fastfind 1.0.0"
+  Version* = "fastfind 2.0.0"
   
   ShortOptsWithValue = {'j', 't', 'd', 'e', 's', 'n'}
   ShortOptsNoValue = {'h', 'v', 'q', 'l', 'r', 'c', 'H', 'L', 'x', 'i', 'f'}
@@ -96,7 +98,7 @@ proc defaultConfig*(): Config =
   result.matchMode = mmGlob
   result.pathMode = pmBaseName
   result.ignoreCase = false
-  result.smartCase = true
+  result.smartCase = false
   result.fullMatch = false
   result.fuzzyMode = false
   result.showFuzzyScore = false
@@ -138,7 +140,7 @@ proc defaultConfig*(): Config =
   result.rankMode = rmNone
   result.rankRecency = false
   result.rankDepth = false
-  result.threads = countProcessors()
+  result.threads = 0
   result.selectMode = false
   result.execCmd = ""
   result.execArgs = @[]
@@ -277,76 +279,129 @@ proc helpText(useColor: bool): string =
   proc B(s: string): string = b(s, useColor)
   proc D(s: string): string = dim(s, useColor)
   proc C(s: string): string = c(s, Cyan, useColor)
+  proc H(s: string): string = c(s, Yellow, useColor)
+  proc G(s: string): string = c(s, Green, useColor)
+  
+  let col1w = 26
+  
+  template pad(t: string; w: int): string = 
+    let diff = w - t.len
+    if diff > 0: t & spaces(diff) else: t
+  template row(a, b: string): string = "  " & pad(a, col1w) & b & "\n"
   
   result = ""
-  result.add(B("fastfind") & " - fast file search\n\n")
-  result.add(B("Usage") & ":\n")
-  result.add("  fastfind " & C("[OPTIONS]") & " " & C("<pattern>") & " " & D("[path ...]") & "\n")
-  result.add("  fastfind " & C("\"<natural language query>\"") & "\n\n")
+  result.add(B("fastfind") & " " & G("2.0.0") & " - Modern file search utility\n")
+  let dashLine = "----------------------------------------------------------------------"
+  result.add(D(dashLine) & "\n\n")
   
-  result.add(B("Pattern modes") & ":\n")
-  result.add("  " & C("--glob") & "              Glob patterns (default)\n")
-  result.add("  " & C("--regex") & "             Regular expressions\n")
-  result.add("  " & C("--fixed") & "             Literal substring match\n")
-  result.add("  " & C("--fuzzy") & "             Fuzzy matching\n")
-  result.add("  " & C("--name") & "              Match basename (default)\n")
-  result.add("  " & C("--full-path") & "         Match full path\n")
-  result.add("  " & C("-i") & ", " & C("--ignore-case") & "   Case-insensitive\n")
-  result.add("  " & C("--smart-case") & "        Smart case sensitivity\n\n")
+  result.add(B("USAGE") & "\n")
+  result.add(row(C("ff [OPTIONS] <pattern>"), "<path> ..."))
+  result.add(row(C("ff \"<natural language>\""), "Plain English queries"))
+  result.add(row(C("ff --interactive"), "Interactive fuzzy search"))
+  result.add("\n")
   
-  result.add(B("Traversal") & ":\n")
-  result.add("  " & C("-H") & ", " & C("--hidden") & "        Include hidden files\n")
-  result.add("  " & C("-L") & ", " & C("--follow") & "        Follow symlinks\n")
-  result.add("  " & C("-x") & ", " & C("--one-file-system") & " Stay on one filesystem\n")
-  result.add("  " & C("--gitignore") & "         Respect .gitignore\n")
-  result.add("  " & C("--min-depth") & " N       Minimum depth\n")
-  result.add("  " & C("--max-depth") & " N       Maximum depth\n")
-  result.add("  " & C("-j") & ", " & C("--threads") & " N   Parallel threads\n\n")
+  result.add(B("PATTERN MATCHING") & "\n")
+  result.add(row(C("--glob"), "Glob patterns (default)"))
+  result.add(row(C("--regex"), "Regular expressions"))
+  result.add(row(C("--fixed"), "Literal substring match"))
+  result.add(row(C("--fuzzy"), "Fuzzy matching"))
+  result.add(row(C("--name"), "Match basename (default)"))
+  result.add(row(C("--full-path"), "Match full path"))
+  result.add(row(C("-i, --ignore-case"), "Case-insensitive matching"))
+  result.add(row(C("--smart-case"), "Smart case (uppercase = case-sensitive)"))
+  result.add("\n")
   
-  result.add(B("Filters") & ":\n")
-  result.add("  " & C("-t") & ", " & C("--type") & " TYPE    f/file, d/dir, l/link\n")
-  result.add("  " & C("--size") & " EXPR         e.g. >10M, 10K..5M\n")
-  result.add("  " & C("--newer") & " TIME        Only newer than TIME\n")
-  result.add("  " & C("--older") & " TIME        Only older than TIME\n")
-  result.add("  " & C("--changed") & " DUR       Modified within duration\n")
-  result.add("  " & C("--recent") & "            Modified in last 24h\n")
-  result.add("  " & C("--contains") & " TEXT     Content contains TEXT\n")
-  result.add("  " & C("--exclude") & " PATTERN   Exclude pattern\n\n")
+  result.add(B("TRAVERSAL OPTIONS") & "\n")
+  result.add(row(C("-H, --hidden"), "Include hidden files/dirs"))
+  result.add(row(C("-L, --follow"), "Follow symbolic links"))
+  result.add(row(C("-x, --one-file-system"), "Stay on one filesystem"))
+  result.add(row(C("--gitignore"), "Respect .gitignore files"))
+  result.add(row(C("--no-gitignore"), "Ignore .gitignore"))
+  result.add(row(C("--min-depth N"), "Minimum directory depth"))
+  result.add(row(C("--max-depth N"), "Maximum directory depth"))
+  result.add(row(C("-j, --threads N"), "Parallel search threads"))
+  result.add("\n")
   
-  result.add(B("Git") & ":\n")
-  result.add("  " & C("--git-modified") & "      Only modified files\n")
-  result.add("  " & C("--git-untracked") & "     Only untracked files\n")
-  result.add("  " & C("--git-tracked") & "       Only tracked files\n")
-  result.add("  " & C("--git-changed") & "       Modified or untracked\n\n")
-  result.add(B("Code") & ":\n")
-  result.add("  " & C("--function") & " NAME     Find function definitions\n")
-  result.add("  " & C("--class") & " NAME        Find class definitions\n")
-  result.add("  " & C("--symbol") & " NAME       Find symbol definitions\n\n")
+  result.add(B("FILTERS") & "\n")
+  result.add(row(C("-t, --type TYPE"), "f=file, d=dir, l=link"))
+  result.add(row(C("--size EXPR"), "e.g. >10M, 1K..5M, =1GB"))
+  result.add(row(C("--newer TIME"), "Modified after TIME"))
+  result.add(row(C("--older TIME"), "Modified before TIME"))
+  result.add(row(C("--changed DUR"), "Modified within duration"))
+  result.add(row(C("--recent"), "Modified in last 24 hours"))
+  result.add(row(C("--contains TEXT"), "Search file contents"))
+  result.add(row(C("--exclude PATTERN"), "Exclude patterns"))
+  result.add("\n")
   
-  result.add(B("Output") & ":\n")
-  result.add("  " & C("-l") & ", " & C("--long") & "        Long format\n")
-  result.add("  " & C("--json") & "              JSON output\n")
-  result.add("  " & C("--absolute") & "          Absolute paths\n")
-  result.add("  " & C("--sort") & " KEY          Sort by path/name/size/time\n")
-  result.add("  " & C("-r") & ", " & C("--reverse") & "     Reverse sort\n")
-  result.add("  " & C("--limit") & " N           Limit results\n")
-  result.add("  " & C("-c") & ", " & C("--count") & "       Count only\n")
-  result.add("  " & C("--stats") & "             Show statistics\n")
-  result.add("  " & C("--exec") & " CMD          Execute CMD for each match ({} = path)\n\n")
+  result.add(B("GIT FILTERS") & "\n")
+  result.add(row(C("--git-modified"), "Modified files only"))
+  result.add(row(C("--git-untracked"), "Untracked files only"))
+  result.add(row(C("--git-tracked"), "Tracked files only"))
+  result.add(row(C("--git-changed"), "Modified or untracked"))
+  result.add("\n")
   
-  result.add(B("Interactive") & ":\n")
-  result.add("  " & C("--interactive") & "       Live search UI\n")
-  result.add("  " & C("--select") & "            Pick interactively\n\n")
+  result.add(B("SEMANTIC SEARCH") & "\n")
+  result.add(row(C("--function NAME"), "Find function definitions"))
+  result.add(row(C("--class NAME"), "Find class definitions"))
+  result.add(row(C("--symbol NAME"), "Find any symbol"))
+  result.add("\n")
   
-  result.add(B("Index") & ":\n")
-  result.add("  " & C("--use-index") & "         Use cached index\n")
-  result.add("  " & C("--rebuild-index") & "     Rebuild index\n")
-  result.add("  " & C("--index-status") & "      Show index status\n\n")
+  result.add(B("OUTPUT FORMATS") & "\n")
+  result.add(row(C("-l, --long"), "Long format with details"))
+  result.add(row(C("--json"), "JSON output"))
+  result.add(row(C("--ndjson"), "Newline-delimited JSON"))
+  result.add(row(C("--table"), "Table format"))
+  result.add(row(C("--absolute"), "Show absolute paths"))
+  result.add(row(C("--relative"), "Show relative paths"))
+  result.add("\n")
   
-  result.add(B("Misc") & ":\n")
-  result.add("  " & C("-h") & ", " & C("--help") & "        Show help\n")
-  result.add("  " & C("--version") & "           Show version\n")
-  result.add("  " & C("-v") & ", " & C("--verbose") & "     Verbose output\n")
+  result.add(B("SORTING & LIMITING") & "\n")
+  result.add(row(C("--sort KEY"), "path|name|size|time"))
+  result.add(row(C("-r, --reverse"), "Reverse sort order"))
+  result.add(row(C("--limit N"), "Limit result count"))
+  result.add(row(C("-c, --count"), "Show count only"))
+  result.add(row(C("--stats"), "Show search statistics"))
+  result.add("\n")
+  
+  result.add(B("ACTIONS") & "\n")
+  result.add(row(C("--exec CMD"), "Execute command on matches"))
+  result.add(row(C("--exec-cmd CMD"), "Execute (no shell)"))
+  result.add(row(C("--select"), "Interactive selection"))
+  result.add("\n")
+  
+  result.add(B("INDEX MODE") & "\n")
+  result.add(row(C("--use-index"), "Search cached index"))
+  result.add(row(C("--rebuild-index"), "Rebuild search index"))
+  result.add(row(C("--index-status"), "Show index status"))
+  result.add("\n")
+  
+  result.add(B("EXAMPLES") & "\n")
+  result.add("  " & H("ff") & " \"*.py\"                    " & D("# Find Python files") & "\n")
+  result.add("  " & H("ff") & " config --changed 1d       " & D("# Files modified today") & "\n")
+  result.add("  " & H("ff") & " \"*.js\" --contains TODO  " & D("# JS files with TODO") & "\n")
+  result.add("  " & H("ff") & " \"python files\"           " & D("# Natural language") & "\n")
+  result.add("  " & H("ff") & " --interactive            " & D("# Interactive UI") & "\n")
+  result.add("\n")
+  
+  result.add(B("NATURAL LANGUAGE QUERIES") & "\n")
+  result.add(D("  \"python files modified this week\"") & "\n")
+  result.add(D("  \"large log files bigger than 10MB\"") & "\n")
+  result.add(D("  \"text files containing password in ~/projects\"") & "\n")
+  result.add(D("  \"images older than 30 days\"") & "\n")
+  result.add("\n")
+  
+  result.add(B("KEY") & "\n")
+  result.add("  " & C("<pattern>") & "  " & D("Search pattern") & "\n")
+  result.add("  " & C("[path]") & "   " & D("Search directory") & "\n")
+  result.add("  " & C("TYPE") & "      " & D("f=file, d=dir, l=link") & "\n")
+  result.add("  " & C("TIME") & "      " & D("YYYY-MM-DD or relative") & "\n")
+  result.add("  " & C("DUR") & "       " & D("1d, 2h, 30m, 1w") & "\n")
+  result.add("  " & C("EXPR") & "      " & D(">10M, 1K..5M, =1GB") & "\n")
+  result.add("\n")
+  
+  result.add(B("MORE INFO") & "\n")
+  result.add("  man ff           Full manual page\n")
+  result.add("  ff --version    Show version\n")
   result.add("  " & C("-q") & ", " & C("--quiet-errors") & " Suppress errors\n")
 
 proc printHelp*() =

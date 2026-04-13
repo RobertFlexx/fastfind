@@ -166,6 +166,7 @@ proc runSemanticSearch(cfg: Config): seq[MatchResult] =
 
 when isMainModule:
   let cfg = parseCli(commandLineParams())
+  let autoThreads = if cfg.threads > 0: cfg.threads else: 1
 
   # handle index management commands
   if cfg.indexCommand != icNone:
@@ -199,9 +200,8 @@ when isMainModule:
   let needsCollect =
     cfg.outputMode in [omJson, omTable] or
     cfg.sortKey != skNone or
-    cfg.limit > 0 or
     cfg.selectMode or
-    cfg.threads > 1 or
+    autoThreads > 1 or
     cfg.fuzzyMode or
     cfg.rankMode != rmNone or
     cfg.gitModified or cfg.gitUntracked or cfg.gitTracked or cfg.gitChanged or
@@ -222,7 +222,7 @@ when isMainModule:
     
     var matches = res.matches
 
-    # apply git filters eeeeeeee
+    # apply git filters
     if cfg.gitModified or cfg.gitUntracked or cfg.gitTracked or cfg.gitChanged:
       applyGitFilters(cfg, matches)
 
@@ -255,11 +255,19 @@ when isMainModule:
 
   else:
     var matched = 0
-    let stats = runSearchStream(cfg,
-      proc(m: MatchResult) =
-        inc matched
-        emitOne(cfg, m)
-    )
+    let stats =
+      if cfg.outputMode == omPlain:
+        runSearchStreamPaths(cfg,
+          proc(p: string) =
+            inc matched
+            stdout.writeLine(p)
+        )
+      else:
+        runSearchStream(cfg,
+          proc(m: MatchResult) =
+            inc matched
+            emitOne(cfg, m)
+        )
 
     if matched == 0:
       if cfg.naturalQuery.len > 0:

@@ -64,7 +64,7 @@ proc fileContainsRegex*(path: string; rx: Regex; maxBytes: int; allowBinary: boo
     let chunk = carry & buf[0..<n]
     if chunk.len > 0 and (not allowBinary) and looksBinary(chunk.toOpenArray(0, chunk.len-1)): return false
     if chunk.match(rx): return true
-    let keep = min(2048, chunk.len)
+    let keep = min(carry.len + 1, chunk.len)
     carry = if keep == 0: "" else: chunk[chunk.len - keep .. ^1]
   false
 
@@ -176,10 +176,7 @@ proc fileContainsRegexSmart*(path: string; rx: Regex; maxBytes: int;
     if size < 1024 * 1024 or maxBytes > 0:
       return fileContainsRegex(path, rx, maxBytes, allowBinary, bytesRead)
     
-    if size < 100 * 1024 * 1024:
-      return fileContainsRegexMmap(path, rx, allowBinary, bytesRead)
-    
-    return fileContainsRegex(path, rx, maxBytes, allowBinary, bytesRead)
+    return fileContainsRegexMmap(path, rx, allowBinary, bytesRead)
 
 type
   LineMatch* = object

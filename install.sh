@@ -378,7 +378,17 @@ apply_user_prefix() {
         BIN_DIR="${PREFIX}/bin"
     fi
     if [ "$MAN_DIR_EXPLICIT" -eq 0 ]; then
-        MAN_DIR="${PREFIX}/share/man/man1"
+        case "$OS" in
+            openbsd|freebsd|netbsd)
+                MAN_DIR="${PREFIX}/man/man1"
+                ;;
+            darwin)
+                MAN_DIR="${PREFIX}/share/man/man1"
+                ;;
+            *)
+                MAN_DIR="${PREFIX}/share/man/man1"
+                ;;
+        esac
     fi
 }
 
@@ -387,7 +397,13 @@ finalize_paths() {
         apply_user_prefix
     else
         [ -n "$BIN_DIR" ] || BIN_DIR="${PREFIX}/bin"
-        [ -n "$MAN_DIR" ] || MAN_DIR="${PREFIX}/share/man/man1"
+        if [ -n "$MAN_DIR" ]; then
+            : # MAN_DIR already set
+        elif [ "$OS" = "openbsd" ] || [ "$OS" = "freebsd" ] || [ "$OS" = "netbsd" ]; then
+            MAN_DIR="${PREFIX}/man/man1"
+        else
+            MAN_DIR="${PREFIX}/share/man/man1"
+        fi
     fi
 }
 
@@ -453,6 +469,25 @@ prepare_workspace() {
     TMP_MAN="${WORKDIR}/${SECONDARY_MANPAGE}"
 }
 
+detect_libc() {
+    if [ "$OS" != "linux" ]; then
+        return 0
+    fi
+    if [ -f /lib/libc.so.6 ] || [ -f /lib64/libc.so.6 ]; then
+        local libc_check
+        libc_check=$(ldd --version 2>&1 | head -1 || true)
+        if echo "$libc_check" | grep -qi musl; then
+            echo "musl"
+        elif echo "$libc_check" | grep -qi "gnu\|glibc"; then
+            echo "glibc"
+        else
+            echo "glibc"
+        fi
+    else
+        echo "glibc"
+    fi
+}
+
 render_header() {
     [ "$QUIET" -eq 1 ] && return 0
     line
@@ -467,7 +502,12 @@ render_header() {
 }
 
 binary_url() {
+    local libc=""
+    libc="$(detect_libc)"
     local asset_name="${SECONDARY_NAME}-${OS}-${ARCH}"
+    if [ "$OS" = "linux" ]; then
+        asset_name="${SECONDARY_NAME}-linux-${libc}-${ARCH}"
+    fi
     if [ "$USE_LATEST_REDIRECT" -eq 1 ]; then
         printf "%s\n" "https://github.com/${REPO}/releases/latest/download/${asset_name}"
     else
@@ -561,25 +601,56 @@ refresh_man_db() {
     local man_root=""
     man_root="$(dirname "$MAN_DIR")"
 
-    if has_cmd mandb; then
-        if [ "$USE_ROOT_CMD" -eq 1 ]; then
-            run_fs mandb -q >/dev/null 2>&1 || true
-        else
-            mandb -q >/dev/null 2>&1 || true
-        fi
-    elif has_cmd makewhatis; then
-        if [ "$USE_ROOT_CMD" -eq 1 ]; then
-            run_fs makewhatis "$man_root" >/dev/null 2>&1 || true
-        else
-            makewhatis "$man_root" >/dev/null 2>&1 || true
-        fi
-    elif has_cmd mandocdb; then
-        if [ "$USE_ROOT_CMD" -eq 1 ]; then
-            run_fs mandocdb "$man_root" >/dev/null 2>&1 || true
-        else
-            mandocdb "$man_root" >/dev/null 2>&1 || true
-        fi
-    fi
+    case "$OS" in
+        openbsd|netbsd)
+            if has_cmd makewhatis; then
+                if [ "$USE_ROOT_CMD" -eq 1 ]; then
+                    run_fs makewhatis "$man_root" >/dev/null 2>&1 || true
+                else
+                    makewhatis "$man_root" >/dev/null 2>&1 || true
+                fi
+            fi
+            ;;
+        freebsd)
+            if has_cmd makewhatis; then
+                if [ "$USE_ROOT_CMD" -eq 1 ]; then
+                    run_fs makewhatis "$man_root" >/dev/null 2>&1 || true
+                else
+                    makewhatis "$man_root" >/dev/null 2>&1 || true
+                fi
+            elif has_cmd mandb; then
+                if [ "$USE_ROOT_CMD" -eq 1 ]; then
+                    run_fs mandb -q >/dev/null 2>&1 || true
+                else
+                    mandb -q >/dev/null 2>&1 || true
+                fi
+            fi
+            ;;
+        darwin)
+            if has_cmd mandb; then
+                if [ "$USE_ROOT_CMD" -eq 1 ]; then
+                    run_fs mandb -q >/dev/null 2>&1 || true
+                else
+                    mandb -q >/dev/null 2>&1 || true
+                fi
+            fi
+            ;;
+        linux|*)
+            if has_cmd mandb; then
+                if [ "$USE_ROOT_CMD" -eq 1 ]; then
+                    run_fs mandb -q >/dev/null 2>&1 || true
+                else
+                    mandb -q >/dev/null 2>&1 || true
+                fi
+            elif has_cmd makewhatis; then
+                if [ "$USE_ROOT_CMD" -eq 1 ]; then
+                    run_fs makewhatis "$man_root" >/dev/null 2>&1 || true
+                else
+                    makewhatis "$man_root" >/dev/null 2>&1 || true
+                fi
+            fi
+            ;;
+    esac
 }
 
 verify_install() {

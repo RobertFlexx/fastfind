@@ -1,13 +1,12 @@
 # src/ff/search.nim
-import std/[os, strutils, options, re]
-import std/times as times
+import std/[os, strutils, options, re, times]
 import core, cli, matchers, content, fuzzy_match
 
 when defined(posix):
   import std/posix
 
 when compileOption("threads"):
-  import std/[locks, atomics]
+  import std/[locks, atomics, threadpool, cpuinfo]
   import parallel
 
 type
@@ -29,6 +28,7 @@ when compileOption("threads"):
       cachedIC: bool
       needInfo: bool
       includeHidden: bool
+      needResultName: bool
 
     WorkerArgs = object
       ctx: ptr WorkerContext
@@ -37,16 +37,22 @@ when compileOption("threads"):
       stats: AtomicStats
       workerId: int
 
+proc effectiveThreadCount(cfg: Config): int {.inline.} =
+  when compileOption("threads"):
+    if cfg.threads > 0:
+      return max(1, min(cfg.threads, 32))
+    # Auto mode defaults to single-thread for low overhead.
+    return 1
+  else:
+    1
+
 proc isHiddenPath(relPath: string): bool {.inline.} =
   if relPath.len == 0: return false
   if relPath[0] == '.': return true
-  var i = 0
-  let last = relPath.len - 1
-  while i < last:
+  for i in 0..<relPath.len - 1:
     let c = relPath[i]
-    inc i
-    if (c == '/' or c == '\\') and relPath[i] == '.':
-      return true
+    if c == '/' or c == '\\':
+      if relPath[i + 1] == '.': return true
   false
 
 proc containsUpper(s: string): bool {.inline.} =
@@ -152,11 +158,15 @@ proc needsFileInfo(cfg: Config): bool {.inline.} =
   cfg.newerThan.isSome or cfg.olderThan.isSome or
   cfg.containsText.len > 0 or cfg.containsRegex.len > 0
 
+proc needsResultName(cfg: Config): bool {.inline.} =
+  cfg.sortKey == skName or
+  cfg.outputMode in {omLong, omJson, omNdJson, omTable}
+
 proc extractName(relPath: string): string {.inline.} =
-  var nameStart = relPath.len - 1
-  while nameStart > 0 and relPath[nameStart - 1] notin {'/', '\\'}:
-    dec nameStart
-  if nameStart >= 0 and nameStart < relPath.len: relPath[nameStart..^1] else: relPath
+  let sepIdx = rfind(relPath, {'/', '\\'})
+  if sepIdx >= 0 and sepIdx + 1 < relPath.len: relPath[sepIdx + 1..^1]
+  elif relPath.len > 0: relPath
+  else: ""
 
 proc scanEntry(rootAbs: string; cfg: Config; matcher: Matcher;
                ex: Excluder; gi: Gitignore; useGi: bool;
@@ -164,6 +174,7 @@ proc scanEntry(rootAbs: string; cfg: Config; matcher: Matcher;
                kind: EntryType; depth: int;
                contentRx: Option[Regex]; cachedIC: bool;
                needInfo: bool; includeHidden: bool;
+               needResultName: bool;
                stats: var Stats): Option[MatchResult] =
   if kind notin cfg.types:
     inc stats.skipped
@@ -193,16 +204,16 @@ proc scanEntry(rootAbs: string; cfg: Config; matcher: Matcher;
     inc stats.skipped
     return none(MatchResult)
 
-  let name = extractName(relPath)
+  var name = ""
+  template ensureName() =
+    if name.len == 0:
+      name = extractName(relPath)
   var fuzzyScore = -1
 
   if cfg.fuzzyMode or cfg.matchMode == mmFuzzy:
+    ensureName()
     let target = if matcher.pathMode == pmFullPath: relPath else: name
-    var t = target
-    if cachedIC:
-      for i in 0..<t.len:
-        let c = t[i]
-        if c in {'A'..'Z'}: t[i] = chr(ord(c) + 32)
+    let t = if cachedIC: target.toLowerAscii() else: target
 
     var bestScore = 999999
     for pat in matcher.fixed:
@@ -217,8 +228,11 @@ proc scanEntry(rootAbs: string; cfg: Config; matcher: Matcher;
     if not matcher.anyMatch(name, relPath):
       return none(MatchResult)
 
+  if needResultName:
+    ensureName()
+
   var size: int64 = 0
-  var mtime: times.Time
+  var mtime: times.Time = times.fromUnix(0)
 
   if needInfo:
     var info: FileInfo
@@ -252,12 +266,279 @@ proc scanEntry(rootAbs: string; cfg: Config; matcher: Matcher;
     path: relPath,
     relPath: relPath,
     absPath: fullPath,
-    name: name,
+    name: if needResultName: name else: "",
     size: size,
     mtime: mtime,
     kind: kind,
     fuzzyScore: fuzzyScore
   ))
+
+proc scanEntryPathOnly(cfg: Config; matcher: Matcher;
+                      ex: Excluder; gi: Gitignore; useGi: bool;
+                      rootDev: int64; fullPath, relPath: string;
+                      kind: EntryType; depth: int;
+                      contentRx: Option[Regex]; cachedIC: bool;
+                      needInfo: bool; includeHidden: bool;
+                      stats: var Stats): bool =
+  if kind notin cfg.types:
+    inc stats.skipped
+    return false
+
+  if cfg.minDepth > 0 and depth < cfg.minDepth:
+    inc stats.skipped
+    return false
+
+  if cfg.maxDepth >= 0 and depth > cfg.maxDepth:
+    inc stats.skipped
+    return false
+
+  if (not includeHidden) and isHiddenPath(relPath):
+    inc stats.skipped
+    return false
+
+  if ex.compiled.len > 0 and ex.isExcluded(relPath):
+    inc stats.skipped
+    return false
+
+  if useGi and isGitIgnored(gi, relPath):
+    inc stats.skipped
+    return false
+
+  if (cfg.containsText.len > 0 or cfg.containsRegex.len > 0) and kind != etFile:
+    inc stats.skipped
+    return false
+
+  if cfg.fuzzyMode or cfg.matchMode == mmFuzzy:
+    let name = extractName(relPath)
+    let target = if matcher.pathMode == pmFullPath: relPath else: name
+    let t = if cachedIC: target.toLowerAscii() else: target
+    var bestScore = 999999
+    for pat in matcher.fixed:
+      let score = fuzzyMatch(pat, t)
+      if score >= 0 and score < bestScore:
+        bestScore = score
+    if bestScore >= 999999:
+      return false
+  else:
+    if not matcher.anyMatch("", relPath):
+      return false
+
+  if needInfo:
+    var info: FileInfo
+    try:
+      info = getFileInfo(fullPath, followSymlink = cfg.followSymlinks)
+    except CatchableError:
+      inc stats.errors
+      return false
+
+    if not passesSize(cfg, info.size.int64) or not passesTime(cfg, info.lastWriteTime):
+      inc stats.skipped
+      return false
+
+    if cfg.containsText.len > 0:
+      var br: int64 = 0
+      let ok = fileContainsTextSmart(fullPath, cfg.containsText, cfg.maxBytes, cfg.allowBinary, br)
+      stats.bytesRead += br
+      if not ok: return false
+
+    if cfg.containsRegex.len > 0:
+      if contentRx.isNone: return false
+      var br: int64 = 0
+      let ok = fileContainsRegexSmart(fullPath, contentRx.get, cfg.maxBytes, cfg.allowBinary, br)
+      stats.bytesRead += br
+      if not ok: return false
+
+  true
+
+proc outputPathFor(cfg: Config; relPath, fullPath: string): string {.inline.} =
+  if cfg.absolute: fullPath
+  elif cfg.relative: relPath
+  else: relPath
+
+proc baseStartIdx(path: string): int {.inline.} =
+  var i = path.len - 1
+  while i >= 0:
+    if path[i] == '/' or path[i] == '\\':
+      return i + 1
+    dec i
+  0
+
+proc isHiddenBase(path: string): bool {.inline.} =
+  let b = baseStartIdx(path)
+  b < path.len and path[b] == '.'
+
+type
+  SimplePatternKind = enum
+    spkExact, spkPrefix, spkSuffix, spkContains
+
+proc parseSimplePattern(cfg: Config; kind: var SimplePatternKind; core: var string): bool =
+  if cfg.patterns.len != 1: return false
+  if cfg.pathMode != pmBaseName: return false
+  if cfg.matchMode == mmFixed:
+    kind = if cfg.fullMatch: spkExact else: spkContains
+    core = cfg.patterns[0]
+    return true
+  if cfg.matchMode != mmGlob: return false
+  let p = cfg.patterns[0]
+  if p.len == 0:
+    kind = spkExact
+    core = ""
+    return true
+  if p[0] == '*' and p[^1] == '*' and p.len > 2 and p[1..^2].find({'*', '?', '[', ']'}) < 0:
+    kind = spkContains
+    core = p[1..^2]
+    return true
+  if p[0] == '*' and p.len > 1 and p[1..^1].find({'*', '?', '[', ']'}) < 0:
+    kind = spkSuffix
+    core = p[1..^1]
+    return true
+  if p[^1] == '*' and p.len > 1 and p[0..^2].find({'*', '?', '[', ']'}) < 0:
+    kind = spkPrefix
+    core = p[0..^2]
+    return true
+  if p.find({'*', '?', '[', ']'}) < 0:
+    kind = spkExact
+    core = p
+    return true
+  false
+
+proc matchSimpleBase(path: string; kind: SimplePatternKind; core: string; ignoreCase: bool): bool {.inline.} =
+  let b = baseStartIdx(path)
+  let nLen = path.len - b
+  case kind
+  of spkExact:
+    if core.len != nLen: return false
+    for i in 0..<core.len:
+      var c = path[b + i]
+      if ignoreCase and c in {'A'..'Z'}: c = chr(ord(c) + 32)
+      let p = core[i]
+      if c != p: return false
+    true
+  of spkPrefix:
+    if core.len > nLen: return false
+    for i in 0..<core.len:
+      var c = path[b + i]
+      if ignoreCase and c in {'A'..'Z'}: c = chr(ord(c) + 32)
+      let p = core[i]
+      if c != p: return false
+    true
+  of spkSuffix:
+    if core.len > nLen: return false
+    let off = path.len - core.len
+    for i in 0..<core.len:
+      var c = path[off + i]
+      if ignoreCase and c in {'A'..'Z'}: c = chr(ord(c) + 32)
+      let p = core[i]
+      if c != p: return false
+    true
+  of spkContains:
+    if core.len == 0: return true
+    if core.len > nLen: return false
+    let last = path.len - core.len
+    var i = b
+    while i <= last:
+      var ok = true
+      for j in 0..<core.len:
+        var c = path[i + j]
+        if ignoreCase and c in {'A'..'Z'}: c = chr(ord(c) + 32)
+        let p = core[j]
+        if c != p:
+          ok = false
+          break
+      if ok: return true
+      inc i
+    false
+
+proc canUseSimplePathStream(cfg: Config): bool {.inline.} =
+  (cfg.matchMode in {mmGlob, mmFixed}) and
+  (not cfg.fuzzyMode) and
+  (not cfg.followSymlinks) and
+  cfg.excludes.len == 0 and
+  (not cfg.useGitignore) and
+  (not cfg.oneFileSystem) and
+  cfg.minDepth == 0 and
+  cfg.maxDepth < 0 and
+  cfg.minSize < 0 and cfg.maxSize < 0 and
+  cfg.newerThan.isNone and cfg.olderThan.isNone and
+  cfg.containsText.len == 0 and cfg.containsRegex.len == 0 and
+  cfg.types == {etFile, etDir, etLink}
+
+when defined(posix):
+  type
+    PosixStackEntry = object
+      absPath: string
+      relPath: string
+      depth: int
+
+  proc direntKind(d: ptr Dirent; parentAbs, name: string): EntryType =
+    when declared(DT_DIR):
+      if d.d_type == DT_DIR: return etDir
+      if d.d_type == DT_REG: return etFile
+      if d.d_type == DT_LNK: return etLink
+    let fullPath = parentAbs / name
+    var st: Stat
+    if lstat(fullPath.cstring, st) == 0:
+      if S_ISDIR(st.st_mode): return etDir
+      if S_ISLNK(st.st_mode): return etLink
+    etFile
+
+  proc runSearchStreamPathsSimplePosix(cfg: Config; rootAbs: string;
+                                       kind: SimplePatternKind; coreCmp: string;
+                                       ignoreCase: bool; emitted: var int;
+                                       onPath: proc(p: string)): Stats =
+    var stack = newSeqOfCap[PosixStackEntry](64)
+    stack.add(PosixStackEntry(absPath: rootAbs, relPath: "", depth: 0))
+    let hasLimit = cfg.limit > 0
+
+    while stack.len > 0:
+      if hasLimit and emitted >= cfg.limit:
+        break
+      let entry = stack.pop()
+      inc result.visitedDirs
+      inc result.visited
+
+      let dirp = opendir(entry.absPath.cstring)
+      if dirp.isNil:
+        inc result.errors
+        continue
+      defer: discard closedir(dirp)
+
+      while true:
+        if hasLimit and emitted >= cfg.limit:
+          break
+        let dent = readdir(dirp)
+        if dent.isNil: break
+        let name = $cast[cstring](addr dent.d_name[0])
+        if name == "." or name == "..":
+          continue
+        if (not cfg.includeHidden) and name.len > 0 and name[0] == '.':
+          inc result.skipped
+          continue
+
+        let kindVal = direntKind(dent, entry.absPath, name)
+        let childDepth = entry.depth + 1
+        inc result.visited
+        case kindVal
+        of etFile: inc result.visitedFiles
+        of etDir: discard
+        of etLink: inc result.visitedLinks
+
+        if kindVal == etDir:
+          let childRel = if entry.relPath.len == 0: name else: entry.relPath & "/" & name
+          let childAbs = entry.absPath / name
+          stack.add(PosixStackEntry(absPath: childAbs, relPath: childRel, depth: childDepth))
+
+        if kindVal in cfg.types and matchSimpleBase(name, kind, coreCmp, ignoreCase):
+          inc result.matched
+          let outPath =
+            if cfg.absolute:
+              entry.absPath / name
+            elif entry.relPath.len == 0:
+              name
+            else:
+              entry.relPath & "/" & name
+          onPath(outPath)
+          inc emitted
 
 when compileOption("threads"):
   proc scanEntryAtomic(rootAbs: string; cfg: Config; matcher: Matcher;
@@ -266,6 +547,7 @@ when compileOption("threads"):
                        kind: EntryType; depth: int;
                        contentRx: Option[Regex]; cachedIC: bool;
                        needInfo: bool; includeHidden: bool;
+                       needResultName: bool;
                        stats: AtomicStats): Option[MatchResult] =
     if kind notin cfg.types:
       stats.incSkipped()
@@ -295,16 +577,16 @@ when compileOption("threads"):
       stats.incSkipped()
       return none(MatchResult)
 
-    let name = extractName(relPath)
+    var name = ""
+    template ensureName() =
+      if name.len == 0:
+        name = extractName(relPath)
     var fuzzyScore = -1
 
     if cfg.fuzzyMode or cfg.matchMode == mmFuzzy:
+      ensureName()
       let target = if matcher.pathMode == pmFullPath: relPath else: name
-      var t = target
-      if cachedIC:
-        for i in 0..<t.len:
-          let c = t[i]
-          if c in {'A'..'Z'}: t[i] = chr(ord(c) + 32)
+      let t = if cachedIC: target.toLowerAscii() else: target
       var bestScore = 999999
       for pat in matcher.fixed:
         let score = fuzzyMatch(pat, t)
@@ -317,8 +599,11 @@ when compileOption("threads"):
       if not matcher.anyMatch(name, relPath):
         return none(MatchResult)
 
+    if needResultName:
+      ensureName()
+
     var size: int64 = 0
-    var mtime: times.Time
+    var mtime: times.Time = times.fromUnix(0)
 
     if needInfo:
       var info: FileInfo
@@ -348,7 +633,7 @@ when compileOption("threads"):
       path: relPath,
       relPath: relPath,
       absPath: fullPath,
-      name: name,
+      name: if needResultName: name else: "",
       size: size,
       mtime: mtime,
       kind: kind,
@@ -357,10 +642,10 @@ when compileOption("threads"):
 
   proc workerProc(args: WorkerArgs) {.thread, gcsafe.} =
     let ctx = args.ctx
-    var localMatches: seq[MatchResult] = @[]
-    var childDirs: seq[DirEntry] = @[]
-    var idleSpins = 0
+    var localMatches = newSeqOfCap[MatchResult](128)
+    var childDirs = newSeqOfCap[DirEntry](128)
     var relBuf = initPathBuffer(512)
+    var spinCount = 0
 
     var gi: Gitignore
     if ctx.useGi:
@@ -371,19 +656,20 @@ when compileOption("threads"):
       if args.queue.isShutdown() or args.results.isLimitReached():
         break
 
-      let batch = args.queue.tryPopBatch(4)
-
+      var batch = args.queue.tryPopBatch(64)
+      
       if batch.len == 0:
-        inc idleSpins
+        spinCount.inc
         if args.queue.isComplete():
           break
-        if idleSpins > 1000:
-          sleep(1)
-          idleSpins = 0
+        if spinCount > 200:
+          spinCount = 0
+          if args.queue.isComplete():
+            break
+          os.sleep(1)
         continue
 
-      idleSpins = 0
-      args.queue.markWorkerActive()
+      spinCount = 0
 
       for entry in batch:
         childDirs.setLen(0)
@@ -417,7 +703,7 @@ when compileOption("threads"):
               ctx.ex, gi, ctx.useGi, ctx.rootDev,
               fullPath, relPath, kind, childDepth,
               ctx.contentRx, ctx.cachedIC,
-              ctx.needInfo, ctx.includeHidden,
+              ctx.needInfo, ctx.includeHidden, ctx.needResultName,
               args.stats
             )
 
@@ -432,19 +718,22 @@ when compileOption("threads"):
           args.queue.pushBatch(childDirs)
         args.queue.decPending()
 
-      args.queue.markWorkerIdle()
-
-      if localMatches.len >= 32:
-        discard args.results.addMatches(localMatches)
+      if localMatches.len >= 64:
+        let added = args.results.addMatches(localMatches)
         localMatches.setLen(0)
+        if added == 0 and args.results.isLimitReached():
+          args.queue.signalShutdown()
+          break
 
     if localMatches.len > 0:
-      discard args.results.addMatches(localMatches)
+      let added = args.results.addMatches(localMatches)
+      if added == 0 and args.results.isLimitReached():
+        args.queue.signalShutdown()
 
   proc runParallelSearch(cfg: Config; rootAbs: string; globalStart: times.Time): SearchResult =
     result.stats.startTime = globalStart
 
-    let numWorkers = max(1, min(cfg.threads, 32))
+    let numWorkers = effectiveThreadCount(cfg)
     let cachedIC = effectiveIgnoreCase(cfg)
     let matcher = buildMatcher(cfg)
     let ex = buildExcluder(cfg)
@@ -453,6 +742,7 @@ when compileOption("threads"):
     let contentRx = compileContentRegex(cfg, cachedIC)
     let needInfo = needsFileInfo(cfg)
     let includeHidden = cfg.includeHidden
+    let needResultName = needsResultName(cfg)
 
     var ctx = WorkerContext(
       rootAbs: rootAbs,
@@ -465,7 +755,8 @@ when compileOption("threads"):
       contentRx: contentRx,
       cachedIC: cachedIC,
       needInfo: needInfo,
-      includeHidden: includeHidden
+      includeHidden: includeHidden,
+      needResultName: needResultName
     )
 
     let queue = newWorkQueue()
@@ -508,13 +799,18 @@ proc scanTreeCollect(rootAbs, startDir: string; cfg: Config;
                      matcher: Matcher; ex: Excluder;
                      gi: Gitignore; useGi: bool; rootDev: int64;
                      contentRx: Option[Regex]; cachedIC: bool;
-                     needInfo: bool; includeHidden: bool;
+                     needInfo: bool; includeHidden: bool; needResultName: bool;
                      stats: var Stats; matches: var seq[MatchResult];
                      stopAt: var bool) =
   var stack = newSeqOfCap[StackEntry](64)
   stack.add(StackEntry(path: startDir, depth: 0))
   let limit = cfg.limit
   let hasLimit = limit > 0
+  template relPathFor(fullPath: string): string =
+    when compileOption("threads"):
+      computeRelPathFast(fullPath, rootAbs)
+    else:
+      safeRelPath(fullPath, rootAbs)
 
   while stack.len > 0 and not stopAt:
     let entry = stack.pop()
@@ -532,14 +828,14 @@ proc scanTreeCollect(rootAbs, startDir: string; cfg: Config;
         elif kind == etLink: inc stats.visitedLinks
         inc stats.visited
 
-        let rel = safeRelPath(p, rootAbs)
+        let rel = relPathFor(p)
 
         if kind == etDir and shouldTraverseDir(cfg, rel, childDepth, ex, gi, useGi, rootDev, p, includeHidden):
           stack.add(StackEntry(path: p, depth: childDepth))
 
         let om = scanEntry(rootAbs, cfg, matcher, ex, gi, useGi, rootDev,
                            p, rel, kind, childDepth, contentRx, cachedIC,
-                           needInfo, includeHidden, stats)
+                           needInfo, includeHidden, needResultName, stats)
         if om.isSome:
           inc stats.matched
           matches.add(om.get)
@@ -564,7 +860,7 @@ proc runSearchCollectSingleRoot(cfg: Config; rootAbs: string; globalStart: times
   result.stats.startTime = globalStart
 
   when compileOption("threads"):
-    if cfg.threads > 1:
+    if effectiveThreadCount(cfg) > 1:
       return runParallelSearch(cfg, rootAbs, globalStart)
 
   let cachedIC = effectiveIgnoreCase(cfg)
@@ -575,6 +871,7 @@ proc runSearchCollectSingleRoot(cfg: Config; rootAbs: string; globalStart: times
   let contentRx = compileContentRegex(cfg, cachedIC)
   let needInfo = needsFileInfo(cfg)
   let includeHidden = cfg.includeHidden
+  let needResultName = needsResultName(cfg)
 
   var gi: Gitignore
   if giInfo.useGi:
@@ -583,7 +880,7 @@ proc runSearchCollectSingleRoot(cfg: Config; rootAbs: string; globalStart: times
 
   var stopAt = false
   scanTreeCollect(rootAbs, rootAbs, cfg, matcher, ex, gi, giInfo.useGi, rootDev,
-                  contentRx, cachedIC, needInfo, includeHidden,
+                  contentRx, cachedIC, needInfo, includeHidden, needResultName,
                   result.stats, result.matches, stopAt)
 
   result.stats.endTime = times.getTime()
@@ -593,8 +890,17 @@ proc runSearchCollect*(cfg: Config): SearchResult =
   result.stats.startTime = start
 
   for p in cfg.paths:
+    if cfg.limit > 0 and result.matches.len >= cfg.limit:
+      break
+
     let rootAbs = absolutePath(p)
-    let part = runSearchCollectSingleRoot(cfg, rootAbs, start)
+    var localCfg = cfg
+    if cfg.limit > 0:
+      localCfg.limit = max(0, cfg.limit - result.matches.len)
+      if localCfg.limit == 0:
+        break
+
+    let part = runSearchCollectSingleRoot(localCfg, rootAbs, start)
     result.matches.add(part.matches)
     mergeStats(result.stats, part.stats)
 
@@ -609,9 +915,14 @@ proc runSearchStream*(cfg: Config; onMatch: proc(m: MatchResult)): Stats =
   let contentRx = compileContentRegex(cfg, cachedIC)
   let needInfo = needsFileInfo(cfg)
   let includeHidden = cfg.includeHidden
+  let needResultName = needsResultName(cfg)
   let hasLimit = cfg.limit > 0
+  var emitted = 0
 
   for p in cfg.paths:
+    if hasLimit and emitted >= cfg.limit:
+      break
+
     let rootAbs = absolutePath(p)
     let giInfo = buildGitignoreLines(cfg, rootAbs)
     let rootDev = if cfg.oneFileSystem: getDeviceId(rootAbs) else: -1
@@ -624,6 +935,11 @@ proc runSearchStream*(cfg: Config; onMatch: proc(m: MatchResult)): Stats =
     var stopAt = false
     var stack = newSeqOfCap[StackEntry](64)
     stack.add(StackEntry(path: rootAbs, depth: 0))
+    template relPathFor(fullPath: string): string =
+      when compileOption("threads"):
+        computeRelPathFast(fullPath, rootAbs)
+      else:
+        safeRelPath(fullPath, rootAbs)
 
     while stack.len > 0 and not stopAt:
       let entry = stack.pop()
@@ -641,20 +957,124 @@ proc runSearchStream*(cfg: Config; onMatch: proc(m: MatchResult)): Stats =
           elif kind == etLink: inc result.visitedLinks
           inc result.visited
 
-          let rel = safeRelPath(fp, rootAbs)
+          let rel = relPathFor(fp)
 
           if kind == etDir and shouldTraverseDir(cfg, rel, childDepth, ex, gi, giInfo.useGi, rootDev, fp, includeHidden):
             stack.add(StackEntry(path: fp, depth: childDepth))
 
           let om = scanEntry(rootAbs, cfg, matcher, ex, gi, giInfo.useGi, rootDev,
                              fp, rel, kind, childDepth, contentRx, cachedIC,
-                             needInfo, includeHidden, result)
+                             needInfo, includeHidden, needResultName, result)
           if om.isSome:
             inc result.matched
             onMatch(om.get)
-            if hasLimit and result.matched >= cfg.limit:
+            inc emitted
+            if hasLimit and emitted >= cfg.limit:
               stopAt = true
               break
+
+      except CatchableError:
+        inc result.errors
+
+  result.endTime = times.getTime()
+
+proc runSearchStreamPaths*(cfg: Config; onPath: proc(p: string)): Stats =
+  result.startTime = times.getTime()
+
+  let cachedIC = effectiveIgnoreCase(cfg)
+  let matcher = buildMatcher(cfg)
+  let ex = buildExcluder(cfg)
+  let contentRx = compileContentRegex(cfg, cachedIC)
+  let needInfo = needsFileInfo(cfg)
+  let includeHidden = cfg.includeHidden
+  let hasLimit = cfg.limit > 0
+  var emitted = 0
+  var spKind: SimplePatternKind
+  var spCore = ""
+  let simplePathMode = canUseSimplePathStream(cfg) and parseSimplePattern(cfg, spKind, spCore)
+  let spCoreCmp = if cachedIC: spCore.toLowerAscii() else: spCore
+
+  for p in cfg.paths:
+    if hasLimit and emitted >= cfg.limit:
+      break
+
+    let rootAbs = absolutePath(p)
+
+    when defined(posix):
+      if simplePathMode:
+        let s = runSearchStreamPathsSimplePosix(cfg, rootAbs, spKind, spCoreCmp, cachedIC, emitted, onPath)
+        result.visited += s.visited
+        result.visitedFiles += s.visitedFiles
+        result.visitedDirs += s.visitedDirs
+        result.visitedLinks += s.visitedLinks
+        result.matched += s.matched
+        result.errors += s.errors
+        result.skipped += s.skipped
+        result.bytesRead += s.bytesRead
+        continue
+
+    let giInfo = buildGitignoreLines(cfg, rootAbs)
+    let rootDev = if cfg.oneFileSystem: getDeviceId(rootAbs) else: -1
+
+    var gi: Gitignore
+    if giInfo.useGi:
+      gi.ignoreCase = true
+      gi.compileGitignore(giInfo.lines)
+
+    var stopAt = false
+    var stack = newSeqOfCap[StackEntry](64)
+    stack.add(StackEntry(path: rootAbs, depth: 0))
+    template relPathFor(fullPath: string): string =
+      when compileOption("threads"):
+        computeRelPathFast(fullPath, rootAbs)
+      else:
+        safeRelPath(fullPath, rootAbs)
+
+    while stack.len > 0 and not stopAt:
+      let entry = stack.pop()
+      inc result.visitedDirs
+      inc result.visited
+
+      try:
+        for pc, fp in walkDir(entry.path, relative = false):
+          if stopAt: break
+
+          let kind = entryTypeFromWalk(pc)
+          let childDepth = entry.depth + 1
+
+          if kind == etFile: inc result.visitedFiles
+          elif kind == etLink: inc result.visitedLinks
+          inc result.visited
+
+          if simplePathMode:
+            if kind == etDir:
+              if includeHidden or not isHiddenBase(fp):
+                stack.add(StackEntry(path: fp, depth: childDepth))
+            else:
+              if includeHidden or not isHiddenBase(fp):
+                if matchSimpleBase(fp, spKind, spCoreCmp, cachedIC):
+                  inc result.matched
+                  let rel = relPathFor(fp)
+                  onPath(outputPathFor(cfg, rel, fp))
+                  inc emitted
+                  if hasLimit and emitted >= cfg.limit:
+                    stopAt = true
+                    break
+          else:
+            let rel = relPathFor(fp)
+
+            if kind == etDir and shouldTraverseDir(cfg, rel, childDepth, ex, gi, giInfo.useGi, rootDev, fp, includeHidden):
+              stack.add(StackEntry(path: fp, depth: childDepth))
+
+            if scanEntryPathOnly(cfg, matcher, ex, gi, giInfo.useGi, rootDev,
+                                 fp, rel, kind, childDepth, contentRx, cachedIC,
+                                 needInfo, includeHidden, result):
+              inc result.matched
+              onPath(outputPathFor(cfg, rel, fp))
+              inc emitted
+              if hasLimit and emitted >= cfg.limit:
+                stopAt = true
+                break
 
       except CatchableError:
         inc result.errors

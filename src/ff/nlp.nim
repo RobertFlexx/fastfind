@@ -20,125 +20,149 @@ type
     humanDescription*: string  # for error messages
 
 const
-  # size comparison words
-  SizeGt = ["larger", "bigger", "greater", "more", "over", "above", "exceeding", "exceed"]
-  SizeLt = ["smaller", "less", "under", "below", "within", "tinier"]
-  SizeEq = ["exactly", "equal", "sized"]
+  NLSignals = @[
+    "files", "file", "directories", "folders", "directory", "folder",
+    "larger", "smaller", "bigger", "bigger", "bigger", "tiny", "huge",
+    "modified", "changed", "created", "accessed", "updated",
+    "containing", "contains", "with", "without",
+    "named", "called", "named", "named",
+    "today", "yesterday", "tonight", "this", "last", "past",
+    "than", "within", "ago", "since", "before", "after",
+    "older", "newer", "recently", "recent",
+    "images", "videos", "photos", "pictures", "documents", "archives",
+    "code", "scripts", "source",
+    "find", "show", "list", "search", "get", "give", "display",
+    "python", "javascript", "java", "rust", "go", "c", "cpp",
+    "logs", "configs", "text", "binary",
+    "empty", "big", "small", "large"
+  ]
 
-  # time anchor words
+  SizeGt = @["larger", "bigger", "greater", "more", "over", "above", "exceeding", "exceed", "bigger", "huge", "massive", "big"]
+  SizeLt = @["smaller", "less", "under", "below", "within", "tinier", "tiny", "little", "short"]
+  SizeEq = @["exactly", "equal", "sized", "exactly", "precisely"]
+
   TimeAnchors = [
-    ("today", 0), ("tonight", 0),
+    ("today", 0), ("tonight", 0), ("now", 0),
     ("yesterday", 1),
-    ("week", 7), ("weekly", 7),
-    ("month", 30), ("monthly", 30),
-    ("year", 365), ("yearly", 365)
+    ("day", 1), ("days", 1),
+    ("week", 7), ("weekly", 7), ("thisweek", 7),
+    ("month", 30), ("monthly", 30), ("thismonth", 30),
+    ("year", 365), ("yearly", 365), ("thisyear", 365)
   ]
 
-  # time unit multipliers
-  TimeUnitDays = ["day", "days", "d"]
-  TimeUnitHours = ["hour", "hours", "hr", "hrs", "h"]
-  TimeUnitWeeks = ["week", "weeks", "w", "wk", "wks"]
-  TimeUnitMonths = ["month", "months", "mo", "mos"]
-  TimeUnitMins = ["minute", "minutes", "min", "mins", "m"]
+  TimeUnitDays = @["day", "days", "d"]
+  TimeUnitHours = @["hour", "hours", "hr", "hrs", "h"]
+  TimeUnitWeeks = @["week", "weeks", "w", "wk", "wks"]
+  TimeUnitMonths = @["month", "months", "mo", "mos"]
+  TimeUnitMins = @["minute", "minutes", "min", "mins", "m"]
 
-  # type words
-  TypeFile = ["file", "files", "document", "documents"]
-  TypeDir  = ["directory", "directories", "folder", "folders", "dir", "dirs"]
-  TypeLink = ["link", "links", "symlink", "symlinks", "shortcut"]
+  TypeFile = @["file", "files", "document", "documents", "doc", "docs"]
+  TypeDir = @["directory", "directories", "folder", "folders", "dir", "dirs"]
+  TypeLink = @["link", "links", "symlink", "symlinks", "shortcut"]
 
-  # nl detection words
-  NLSignals = ["files", "file", "directories", "folders", "larger", "smaller",
-               "bigger", "modified", "changed", "created", "containing",
-               "named", "today", "yesterday", "than", "within", "ago",
-               "images", "videos", "documents", "photos", "recently",
-               "last", "past", "older", "newer", "since", "before",
-               "find", "show", "list", "search", "get", "give"]
+  CategoryImages = @[".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".svg", ".tiff", ".ico", ".heic", ".raw", ".avif", ".webp"]
+  CategoryVideos = @[".mp4", ".avi", ".mkv", ".mov", ".wmv", ".flv", ".webm", ".m4v", ".mpeg", ".mpg", ".prores"]
+  CategoryAudio = @[".mp3", ".wav", ".flac", ".aac", ".ogg", ".m4a", ".wma", ".opus", ".aiff", ".alac"]
+  CategoryDocs = @[".pdf", ".doc", ".docx", ".odt", ".rtf", ".tex", ".pages", ".epub", ".mobi"]
+  CategoryText = @[".txt", ".md", ".markdown", ".rst", ".org", ".csv", ".tsv", ".json", ".yaml", ".yml"]
+  CategoryArchives = @[".zip", ".tar", ".gz", ".bz2", ".xz", ".7z", ".rar", ".tgz", ".zst", ".lz", ".lz4"]
+  CategoryCode = @[".c", ".cpp", ".h", ".hpp", ".cs", ".java", ".go", ".rs", ".py", ".js", ".ts", ".rb", ".php", ".swift", ".kt", ".nim", ".zig", ".v", ".d", ".lua", ".r", ".m", ".scala", ".hs", ".ex", ".exs", ".erl", ".hrl", ".clj", ".cljs", ".fs", ".fsx", ".vue", ".svelte", ".html", ".htm", ".css", ".scss", ".sass", ".less", ".sql"]
+  CategoryConfig = @[".toml", ".yaml", ".yml", ".json", ".xml", ".ini", ".cfg", ".conf", ".env", ".properties", ".plist", ".toml"]
+  CategoryLogs = @[".log", ".out", ".err", ".trace", ".debug"]
+  CategorySheets = @[".xls", ".xlsx", ".ods", ".numbers", ".csv"]
+  CategorySlides = @[".ppt", ".pptx", ".odp", ".key"]
 
-  # file category, extensions
-  CategoryImages   = [".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".svg", ".tiff", ".ico", ".heic", ".raw"]
-  CategoryVideos   = [".mp4", ".avi", ".mkv", ".mov", ".wmv", ".flv", ".webm", ".m4v", ".mpeg", ".mpg"]
-  CategoryAudio    = [".mp3", ".wav", ".flac", ".aac", ".ogg", ".m4a", ".wma", ".opus", ".aiff"]
-  CategoryDocs     = [".pdf", ".doc", ".docx", ".odt", ".rtf", ".tex", ".pages"]
-  CategoryText     = [".txt", ".md", ".rst", ".org", ".csv", ".tsv"]
-  CategoryArchives = [".zip", ".tar", ".gz", ".bz2", ".xz", ".7z", ".rar", ".tgz", ".zst"]
-  CategoryCode     = [".c", ".cpp", ".h", ".hpp", ".cs", ".java", ".go", ".rs",
-                      ".py", ".js", ".ts", ".rb", ".php", ".swift", ".kt",
-                      ".nim", ".zig", ".v", ".d", ".lua", ".r", ".m", ".scala"]
-  CategoryConfig   = [".toml", ".yaml", ".yml", ".json", ".xml", ".ini", ".cfg",
-                      ".conf", ".env", ".properties", ".plist"]
-  CategoryLogs     = [".log", ".out", ".err"]
-  CategorySheets   = [".xls", ".xlsx", ".ods", ".numbers", ".csv"]
-  CategorySlides   = [".ppt", ".pptx", ".odp", ".key"]
-
-  # language, extensions
   LangMap = [
-    ("python",      @[".py", ".pyw", ".pyx"]),
-    ("javascript",  @[".js", ".mjs", ".cjs"]),
-    ("typescript",  @[".ts", ".tsx"]),
-    ("js",          @[".js", ".mjs"]),
-    ("ts",          @[".ts", ".tsx"]),
-    ("rust",        @[".rs"]),
-    ("go",          @[".go"]),
-    ("golang",      @[".go"]),
-    ("c",           @[".c", ".h"]),
-    ("cpp",         @[".cpp", ".cc", ".cxx", ".hpp", ".hxx"]),
-    ("c++",         @[".cpp", ".cc", ".cxx", ".hpp"]),
-    ("java",        @[".java"]),
-    ("kotlin",      @[".kt", ".kts"]),
-    ("swift",       @[".swift"]),
-    ("ruby",        @[".rb", ".rake"]),
-    ("rb",          @[".rb"]),
-    ("php",         @[".php"]),
-    ("nim",         @[".nim", ".nims"]),
-    ("zig",         @[".zig"]),
-    ("lua",         @[".lua"]),
-    ("shell",       @[".sh", ".bash", ".zsh", ".fish"]),
-    ("bash",        @[".sh", ".bash"]),
-    ("zsh",         @[".zsh"]),
-    ("fish",        @[".fish"]),
-    ("haskell",     @[".hs", ".lhs"]),
-    ("scala",       @[".scala"]),
-    ("elixir",      @[".ex", ".exs"]),
-    ("erlang",      @[".erl", ".hrl"]),
-    ("clojure",     @[".clj", ".cljs"]),
-    ("fsharp",      @[".fs", ".fsx"]),
-    ("csharp",      @[".cs"]),
-    ("cs",          @[".cs"]),
-    ("r",           @[".r", ".rmd"]),
-    ("matlab",      @[".m", ".mat"]),
-    ("dart",        @[".dart"]),
-    ("vue",         @[".vue"]),
-    ("svelte",      @[".svelte"]),
-    ("html",        @[".html", ".htm"]),
-    ("css",         @[".css", ".scss", ".sass", ".less"]),
-    ("sql",         @[".sql"]),
-    ("toml",        @[".toml"]),
-    ("yaml",        @[".yaml", ".yml"]),
-    ("json",        @[".json"]),
-    ("xml",         @[".xml"]),
-    ("markdown",    @[".md", ".markdown"]),
-    ("md",          @[".md"]),
+    ("python", @[".py", ".pyw", ".pyx"]),
+    ("javascript", @[".js", ".mjs", ".cjs"]),
+    ("typescript", @[".ts", ".tsx"]),
+    ("js", @[".js", ".mjs"]),
+    ("ts", @[".ts", ".tsx"]),
+    ("rust", @[".rs"]),
+    ("go", @[".go"]),
+    ("golang", @[".go"]),
+    ("c", @[".c", ".h"]),
+    ("cpp", @[".cpp", ".cc", ".cxx", ".hpp", ".hxx"]),
+    ("c++", @[".cpp", ".cc", ".cxx", ".hpp"]),
+    ("java", @[".java"]),
+    ("kotlin", @[".kt", ".kts"]),
+    ("swift", @[".swift"]),
+    ("ruby", @[".rb", ".rake"]),
+    ("rb", @[".rb"]),
+    ("php", @[".php"]),
+    ("nim", @[".nim", ".nims"]),
+    ("zig", @[".zig"]),
+    ("lua", @[".lua"]),
+    ("shell", @[".sh", ".bash", ".zsh", ".fish", ".ksh", ".csh", ".tcsh"]),
+    ("bash", @[".sh", ".bash"]),
+    ("zsh", @[".zsh"]),
+    ("fish", @[".fish"]),
+    ("haskell", @[".hs", ".lhs"]),
+    ("scala", @[".scala"]),
+    ("elixir", @[".ex", ".exs"]),
+    ("erlang", @[".erl", ".hrl"]),
+    ("clojure", @[".clj", ".cljs"]),
+    ("fsharp", @[".fs", ".fsx"]),
+    ("csharp", @[".cs"]),
+    ("cs", @[".cs"]),
+    ("r", @[".r", ".rmd"]),
+    ("matlab", @[".m", ".mat"]),
+    ("dart", @[".dart"]),
+    ("vue", @[".vue"]),
+    ("svelte", @[".svelte"]),
+    ("html", @[".html", ".htm"]),
+    ("css", @[".css", ".scss", ".sass", ".less"]),
+    ("sql", @[".sql"]),
+    ("toml", @[".toml"]),
+    ("yaml", @[".yaml", ".yml"]),
+    ("json", @[".json"]),
+    ("xml", @[".xml"]),
+    ("markdown", @[".md", ".markdown"]),
+    ("md", @[".md"]),
+    ("cvs", @[".cvs"]),
+    ("perl", @[".pl", ".pm"]),
+    ("perl5", @[".pl", ".pm"]),
+    ("pascal", @[".pas", ".pp"]),
+    ("fortran", @[".f", ".f90", ".f95"]),
+    ("objectivec", @[".m", ".mm"]),
   ]
 
-  # filler words to skip
-  FillerWords = ["a", "an", "the", "that", "are", "is", "and", "or",
-                 "all", "any", "find", "search", "show", "list", "get",
-                 "give", "me", "my", "i", "want", "need", "please",
-                 "which", "what", "where", "how", "have", "been",
-                 "were", "was", "some", "those", "these", "with",
-                 "of", "at", "by", "for", "from", "into", "on", "up"]
+  FillerWords = @[
+    "a", "an", "the", "that", "are", "is", "and", "or", "but", "so",
+    "all", "any", "some", "these", "those", "every", "each",
+    "find", "search", "show", "list", "get", "give", "display", "look",
+    "me", "my", "i", "we", "you", "they", "he", "she", "it",
+    "want", "need", "would", "could", "should", "will", "can", "may",
+    "please", "kindly",
+    "which", "what", "where", "when", "why", "how", "who",
+    "have", "has", "had", "been", "were", "was", "do", "does", "did",
+    "with", "without", "for", "to", "from", "of", "at", "by", "on", "in", "into", "over", "under",
+    "as", "like", "about", "than", "then", "than"
+  ]
 
 proc isNaturalLanguageQuery*(query: string): bool =
-  let words = query.toLowerAscii().split()
+  let q = query.strip()
+  if q.len == 0: return false
+  
+  let qlc = q.toLowerAscii()
+  let words = qlc.split()
+  
   if words.len < 2: return false
+  
   var score = 0
   for word in words:
     if word in NLSignals: inc score
-    # has spaces = likely nl
+    if word in SizeGt or word in SizeLt: inc score
+    if word in TypeFile or word in TypeDir: inc score
+  
   if score >= 1: return true
-  # quoted string with spaces and no glob chars is likely nl
-  if ' ' in query and '*' notin query and '?' notin query:
+  
+  if ' ' in q and '*' notin q and '?' notin q and '(' notin q:
     return true
+  
+  if qlc.contains("modified") or qlc.contains("containing") or qlc.contains("containing"):
+    return true
+  
   false
 
 proc getTimeDays(word: string): int =

@@ -6,9 +6,10 @@ type
     text*: string
     score*: int  # lower is better fr
 
-proc levenshtein(a, b: string): int =
+proc levenshtein(a, b: string; maxDist: int = 999): int =
   if a.len == 0: return b.len
   if b.len == 0: return a.len
+  if abs(a.len - b.len) > maxDist: return maxDist + 1
   var prev = newSeq[int](b.len + 1)
   var cur  = newSeq[int](b.len + 1)
   for j in 0..b.len: prev[j] = j
@@ -20,6 +21,8 @@ proc levenshtein(a, b: string): int =
       let cost = (if ca == cb: 0 else: 1)
       cur[j] = min(min(prev[j] + 1, cur[j-1] + 1), prev[j-1] + cost)
     swap(prev, cur)
+    if prev[b.len] > maxDist:
+      return maxDist + 1
   result = prev[b.len]
 
 proc suggestClosest*(needle: string; candidates: seq[string]; limit = 3): seq[Suggestion] =
