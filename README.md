@@ -33,11 +33,11 @@ Expect occasional bugs or behavioral changes.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-1f6feb?style=for-the-badge)](LICENSE)
 [![Language: Nim](https://img.shields.io/badge/Language-Nim-FFC200?style=for-the-badge&logo=nim&logoColor=black)](https://nim-lang.org/)
-[![Linux](https://img.shields.io/badge/Linux-Supported-2ea44f?style=for-the-badge&logo=linux&logoColor=white)](#platform-support)
-[![macOS](https://img.shields.io/badge/macOS-Supported-2ea44f?style=for-the-badge&logo=apple&logoColor=white)](#platform-support)
-[![FreeBSD](https://img.shields.io/badge/FreeBSD-Supported-2ea44f?style=for-the-badge&logo=freebsd&logoColor=white)](#platform-support)
-[![OpenBSD](https://img.shields.io/badge/OpenBSD-Supported-2ea44f?style=for-the-badge&logo=openbsd&logoColor=white)](#platform-support)
-[![NetBSD](https://img.shields.io/badge/NetBSD-Supported-2ea44f?style=for-the-badge&logo=netbsd&logoColor=white)](#platform-support)
+[![Linux](https://img.shields.io/badge/Linux-Supported-2ea44f?style=for-the-badge&logo=linux&logoColor=white)](https://www.kernel.org/)
+[![macOS](https://img.shields.io/badge/macOS-Supported-2ea44f?style=for-the-badge&logo=apple&logoColor=white)](https://www.apple.com/macos/)
+[![FreeBSD](https://img.shields.io/badge/FreeBSD-Supported-2ea44f?style=for-the-badge&logo=freebsd&logoColor=white)](https://www.freebsd.org/)
+[![OpenBSD](https://img.shields.io/badge/OpenBSD-Supported-2ea44f?style=for-the-badge&logo=openbsd&logoColor=white)](https://www.openbsd.org/)
+[![NetBSD](https://img.shields.io/badge/NetBSD-Supported-2ea44f?style=for-the-badge&logo=netbsd&logoColor=white)](https://www.netbsd.org/)
 
 `fastfind`/`ff` is a fast file finder with:
 
