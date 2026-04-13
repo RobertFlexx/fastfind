@@ -31,9 +31,13 @@ Cross-platform, single binary, zero runtime dependencies (written in Nim).
 ⚠ fastfind is still early in development.
 Expect occasional bugs or behavioral changes.
 
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Nim](https://img.shields.io/badge/language-Nim-yellow)](https://nim-lang.org/)
-[![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20BSD-lightgrey)]()
+[![License: MIT](https://img.shields.io/badge/License-MIT-1f6feb?style=for-the-badge)](LICENSE)
+[![Language: Nim](https://img.shields.io/badge/Language-Nim-FFC200?style=for-the-badge&logo=nim&logoColor=black)](https://nim-lang.org/)
+[![Linux](https://img.shields.io/badge/Linux-Supported-2ea44f?style=for-the-badge&logo=linux&logoColor=white)](#platform-support)
+[![macOS](https://img.shields.io/badge/macOS-Supported-2ea44f?style=for-the-badge&logo=apple&logoColor=white)](#platform-support)
+[![FreeBSD](https://img.shields.io/badge/FreeBSD-Supported-2ea44f?style=for-the-badge&logo=freebsd&logoColor=white)](#platform-support)
+[![OpenBSD](https://img.shields.io/badge/OpenBSD-Supported-2ea44f?style=for-the-badge&logo=openbsd&logoColor=white)](#platform-support)
+[![NetBSD](https://img.shields.io/badge/NetBSD-Supported-2ea44f?style=for-the-badge&logo=netbsd&logoColor=white)](#platform-support)
 
 `fastfind`/`ff` is a fast file finder with:
 
@@ -80,6 +84,14 @@ nim c -d:danger -d:release --mm:orc --threads:on -d:lto --opt:speed \
   -o:bin/fastfind src/ff.nim
 ```
 
+Nushell:
+
+```nu
+git clone https://github.com/RobertFlexx/fastfind
+cd fastfind
+nim c '-d:danger' '-d:release' '--mm:orc' '--threads:on' '-d:lto' '--opt:speed' '--passC:-O3' '--passC:-march=native' '--passC:-flto' '--passL:-flto' '--passL:-s' '-o:bin/fastfind' src/ff.nim
+```
+
 #### Build Flags Explained
 
 | Flag | Purpose | Recommended |
@@ -105,9 +117,21 @@ nim c -d:danger -d:release --mm:orc --threads:on -d:lto --opt:speed \
   -o:bin/fastfind src/ff.nim
 ```
 
+Nushell:
+
+```nu
+nim c '-d:danger' '-d:release' '--mm:orc' '--threads:on' '-d:lto' '--opt:speed' '--passC:-O3' '--passC:-march=x86-64' '--passC:-flto' '--passL:-flto' '--passL:-s' '-o:bin/fastfind' src/ff.nim
+```
+
 **Debug build (for testing):**
 ```bash
 nim c --threads:on -o:bin/fastfind_debug src/ff.nim
+```
+
+Nushell:
+
+```nu
+nim c '--threads:on' '-o:bin/fastfind_debug' src/ff.nim
 ```
 
 **Production build (balanced):**
@@ -116,11 +140,55 @@ nim c -d:danger -d:release --mm:arc --threads:on --opt:speed \
   -o:bin/fastfind src/ff.nim
 ```
 
+Nushell:
+
+```nu
+nim c '-d:danger' '-d:release' '--mm:arc' '--threads:on' '--opt:speed' '-o:bin/fastfind' src/ff.nim
+```
+
 ### Install to PATH
 
 ```bash
 sudo cp bin/fastfind /usr/local/bin/ff
 ```
+
+## Troubleshooting
+
+### libpcre.so error
+
+If you see this error when running `ff`:
+```
+could not load: libpcre.so
+```
+
+First, check which library your binary actually needs:
+
+```bash
+ldd "$(command -v ff)" | rg -i pcre
+```
+
+Then install the matching runtime package for your distro:
+
+| OS/Distro | Package Name | Install Command |
+|-----------|--------------|------------------|
+| **Ubuntu/Debian** | libpcre3 | `sudo apt install libpcre3` |
+| **Fedora/RHEL/CentOS (current repos)** | pcre2 | `sudo dnf install pcre2` |
+| **Arch Linux** | pcre (legacy `libpcre.so.*`) | `sudo pacman -S pcre` |
+| **openSUSE** | libpcre1 | `sudo zypper install libpcre1` |
+| **Alpine Linux** | pcre | `doas apk add pcre` |
+| **macOS** | pcre (via brew) | `brew install pcre` |
+| **FreeBSD** | pcre | `sudo pkg install pcre` |
+| **OpenBSD** | pcre | `doas pkg_add pcre` |
+
+If you still see an error for a specific SONAME (for example `libpcre.so.3`), query which package provides it:
+```bash
+sudo dnf provides '*/libpcre.so*'
+```
+
+On Fedora/RHEL 10+, legacy PCRE1 (`libpcre.so.*`) is no longer in default repos. If your binary was built against PCRE1, use a static release binary or rebuild against currently available libraries.
+On Arch, `pcre` is available but deprecated upstream; new builds should prefer PCRE2.
+
+> **Tip**: Using static builds from the release page avoids this dependency issue entirely.
 
 ## Quick start
 

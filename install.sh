@@ -759,7 +759,7 @@ main() {
     fi
 
     if [ "$OS" = "linux" ] && [ "$DISTRO_ID" = "linuxmint" ]; then
-        note "Linux Mint detected precisely"
+        note "Linux Mint detected precisely (why? funni)"
     fi
 
     download_binary
