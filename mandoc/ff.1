@@ -1,268 +1,439 @@
-.TH FASTFIND 1 "March 2026" "fastfind" "User Commands"
+.TH FASTFIND 1 "April 2026" "fastfind 2.1.0" "User Commands"
 
 .SH NAME
-fastfind - fast recursive file search tool
+fastfind \\- blazing fast file search utility with fuzzy matching and git awareness
 
 .SH SYNOPSIS
 .B fastfind
-[\fIOPTIONS\fR] \fIPATTERN\fR [\fIPATH\fR ...]
+[\\fIOPTIONS\\fR] \\fIPATTERN\\fR [\\fIPATH\\fR ...]
 
 .B fastfind
-"\fInatural language query\fR"
+"\\fInatural language query\\fR"
+
+.B fastfind
+--interactive
 
 .SH DESCRIPTION
-.B fastfind
-is a fast file searching tool designed for quickly locating files,
-directories, and code symbols. It supports glob patterns, regular
-expressions, fuzzy matching, and content searching.
 
-Results can be filtered by file type, size, time, and Git status.
-Commands may also be executed for each match using the
-.B --exec
-option.
+Fastfind is a high-performance file searching utility written in Nim, designed as a modern alternative to the traditional
+.B find
+command. It combines exceptional speed with a rich feature set including multiple pattern matching modes, flexible filtering, and git-aware searching.
 
-.SH PATTERN MODES
-.TP
-.B --glob
-Match using glob patterns (default).
+.PP
+Fastfind uses an optimized single-threaded traversal algorithm that achieves significantly better performance than parallel implementations for typical recursive listings. The key to its speed lies in avoiding unnecessary filesystem operations: pattern matching is performed before any stat calls, buffers are reused throughout execution, and output is batched to minimize system call overhead.
 
-.TP
-.B --regex
-Match using regular expressions.
+.SH GETTING STARTED
 
-.TP
-.B --fixed
-Literal substring match.
+The simplest way to use fastfind is to provide a pattern and a search path:
 
-.TP
-.B --fuzzy
-Fuzzy matching against filenames.
+.PP
+.nf
+$ fastfind "*.py" ~/projects
+$ fastfind "*.rs" /src
+$ fastfind "config" .
+.fi
 
-.TP
-.B --name
-Match against basename only (default).
+.PP
+Patterns can be globs (default), regular expressions, fixed strings, or fuzzy matches. If no pattern is provided, fastfind matches everything - but the universal wildcard
+.B *
+is recommended for explicit matching:
 
-.TP
-.B --full-path
-Match against the full file path.
+.PP
+.nf
+$ fastfind "*" /home/user/documents
+.fi
 
-.TP
-.B -i, --ignore-case
-Case insensitive matching.
+.SH PERFORMANCE
 
-.TP
-.B --smart-case
-Case insensitive unless the pattern contains uppercase characters.
+Fastfind implements several optimizations that make it significantly faster than traditional find for common use cases:
 
-.SH TRAVERSAL
-.TP
-.B -H, --hidden
-Include hidden files.
+.IP "\fBUniversal wildcard fast path\fR" 4
+When the pattern is
+.B *
+(meaning "match everything"), fastfind activates a special fast path that skips unnecessary matching logic entirely. This is the fastest possible mode.
 
-.TP
-.B -L, --follow
-Follow symbolic links.
+.IP "\fBPattern-before-stat ordering\fR" 4
+Fastfind evaluates the filename pattern before making any stat() system calls. Files that don't match the pattern never trigger a stat, saving significant syscall overhead on large directories.
 
-.TP
-.B -x, --one-file-system
-Do not cross filesystem boundaries.
+.IP "\fBBuffered output\fR" 4
+Rather than writing each result individually, fastfind buffers output (256KB chunks) and writes in batches. This dramatically reduces write() system calls.
 
-.TP
-.B --gitignore
-Respect .gitignore rules.
+.IP "\fBBuffer reuse\fR" 4
+Rather than allocating new strings for every path construction, fastfind reuses a single buffer throughout execution. This minimizes heap allocations in the hot path.
 
-.TP
-.B --min-depth N
-Minimum traversal depth.
+.PP
+.B About parallel mode:
+Note that the parallel mode
+.B (-j N)
+is generally
+.I slower
+than single-threaded execution for simple recursive listings. The filesystem traversal workload is I/O-bound, not CPU-bound, so threading adds synchronization overhead without benefit. Use parallel mode only for CPU-intensive workloads like content searching with complex patterns.
 
-.TP
-.B --max-depth N
-Maximum traversal depth.
+.SH PATTERN MATCHING
 
-.TP
-.B -j, --threads N
-Number of parallel search threads.
+Fastfind supports multiple pattern matching modes, selected via command-line options:
 
-.SH FILTERS
-.TP
-.B -t, --type TYPE
-Filter by type: f (file), d (directory), l (symlink).
+.SS Glob Matching (default)
+The default mode uses shell-style glob patterns:
 
-.TP
-.B --size EXPR
-Filter by file size (e.g. >10M, 10K..5M).
+.PP
+.nf
+$ fastfind "*.py"          # any .py file
+$ fastfind "*.c"           # any .c file  
+$ fastfind "test*"         # anything starting with test
+$ fastfind "*config*"     # anything containing config
+.fi
 
-.TP
-.B --newer TIME
-Only files newer than the given timestamp.
+.SS Regular Expressions
+For more complex patterns, use POSIX-style regular expressions:
 
-.TP
-.B --older TIME
-Only files older than the given timestamp.
+.PP
+.nf
+$ fastfind --regex "\\.py$"
+$ fastfind --regex "test_[0-9]+\\.rs"
+.fi
 
-.TP
-.B --changed DUR
-Files modified within the given duration.
+.SS Fixed String Match
+For exact substring matching without glob interpretation:
 
-.TP
-.B --recent
-Files modified within the last 24 hours.
+.PP
+.nf
+$ fastfind --fixed "config"   # files containing "config" in name
+.fi
 
-.TP
-.B --contains TEXT
-Search file contents for TEXT.
+.SS Fuzzy Matching
+When you remember part of a filename but not exact spelling:
 
-.TP
-.B --exclude PATTERN
-Exclude paths matching the pattern.
+.PP
+.nf
+$ fastfind --fuzzy confg       # finds "config", "configure", etc.
+$ fastfind --fuzzy srcfile    # finds "sourcefile", etc.
+.fi
+
+.SS Case Sensitivity
+By default, patterns are case-sensitive. Control this with:
+
+.IP "\fB-i, --ignore-case\fR" 4
+Always case-insensitive matching.
+
+.IP "\fB--smart-case\fR" 4
+Case-insensitive by default, but switches to case-sensitive if the pattern contains uppercase letters. This is often the best choice.
+
+.SH TRAVERSAL OPTIONS
+
+.SS Hidden Files
+By default, fastfind does not show hidden files (those starting with dot):
+
+.PP
+.nf
+$ fastfind "*.py"             # exclude hidden files
+$ fastfind -H "*.py"         # include hidden files
+.fi
+
+.SS Symbolic Links
+To follow symbolic links during traversal:
+
+.PP
+.nf
+$ fastfind -L "*.so"          # follow symlinks
+.fi
+
+.SS Filesystem Boundaries
+To stay within a single filesystem:
+
+.PP
+.nf
+$ fastfind -x "*.log"         # don't cross filesystem boundaries
+.fi
+
+.SS Depth Control
+Limit how deep the search goes:
+
+.PP
+.nf
+$ fastfind "*" --max-depth 2   # max 2 levels deep
+$ fastfind "*" --min-depth 2   # at least 2 levels deep
+.fi
+
+.SS Git Integration
+Fastfind can respect .gitignore rules:
+
+.PP
+.nf
+$ fastfind "*.py" --gitignore   # respect .gitignore (default)
+$ fastfind "*.py" --no-gitignore # ignore .gitignore
+.fi
+
+.SH FILE FILTERS
+
+Beyond filename matching, fastfind can filter by file properties:
+
+.SS File Type
+Filter by type using -t with codes f (file), d (directory), l (link):
+
+.PP
+.nf
+$ fastfind -t d "config"      # directories named config
+$ fastfind -t f "*.c"          # regular .c files
+$ fastfind -t l "*.so"         # symbolic links
+$ fastfind -t fd "src"         # files AND directories
+.fi
+
+.SS File Size
+Filter by size using expressions:
+
+.PP
+.nf
+$ fastfind "*" --size >10M     # larger than 10MB
+$ fastfind "*" --size <100K    # smaller than 100KB
+$ fastfind "*" --size =1GB     # exactly 1GB
+$ fastfind "*" --size 1K..10M  # between 1KB and 10MB
+.fi
+
+.SS Modification Time
+Filter by modification time:
+
+.PP
+.nf
+$ fastfind "*" --recent               # modified in last 24h
+$ fastfind "*" --newer 2024-01-01      # modified after Jan 1, 2024
+$ fastfind "*" --older 30d             # older than 30 days
+$ fastfind "*" --changed 1w           # changed within last week
+.fi
+
+.SS Content Search
+Search file contents (not filenames):
+
+.PP
+.nf
+$ fastfind "*.py" --contains "TODO"
+$ fastfind "*.js" --contains "export const"
+.fi
+
+.SS Exclusion Patterns
+Exclude paths matching patterns:
+
+.PP
+.nf
+$ fastfind "*" --exclude "*test*"
+$ fastfind "*" --exclude "node_modules"
+.fi
 
 .SH GIT FILTERS
-.TP
-.B --git-modified
-Show only modified files.
 
-.TP
-.B --git-untracked
-Show only untracked files.
+When run in a git repository, fastfind can filter by git status:
 
-.TP
-.B --git-tracked
-Show only tracked files.
+.PP
+.nf
+$ fastfind --git-modified   # modified but unstaged
+$ fastfind --git-untracked  # new files not in git
+$ fastfind --git-tracked    # files known to git
+$ fastfind --git-changed    # modified OR untracked
+.fi
 
-.TP
-.B --git-changed
-Show modified or untracked files.
+.SH OUTPUT FORMATS
 
-.SH CODE SEARCH
-.TP
-.B --function NAME
-Find function definitions matching NAME.
+.SS Plain Output (default)
+Simply print matching paths, one per line:
 
-.TP
-.B --class NAME
-Find class definitions matching NAME.
+.PP
+.nf
+$ fastfind "*.py" src/
+src/main.py
+src/utils/helpers.py
+.fi
 
-.TP
-.B --symbol NAME
-Find symbol definitions.
+.SS Long Format
+Show detailed information:
 
-.SH OUTPUT
-.TP
-.B -l, --long
-Show extended file information.
+.PP
+.nf
+$ fastfind -l "*.py"
+-rw-r--r--  1234 2024-01-15 10:30 src/main.py
+-rw-r--r--  5678 2024-01-16 14:22 src/utils/helpers.py
+.fi
 
-.TP
-.B --json
-Output results as JSON.
+.SS JSON Output
+For scripting, structured formats:
 
-.TP
-.B --absolute
-Print absolute paths.
+.PP
+.nf
+$ fastfind --json "*.py" | jq '.path'
+.fi
 
-.TP
-.B --sort KEY
-Sort results by path, name, size, or time.
+.SH SORTING
 
-.TP
-.B -r, --reverse
-Reverse sort order.
+Sort results by various keys:
 
-.TP
-.B --limit N
-Limit the number of results.
+.PP
+.nf
+$ fastfind "*" --sort name         # sort alphabetically
+$ fastfind "*" --sort size         # sort by size
+$ fastfind "*" --sort time        # sort by modification time
+$ fastfind "*" --sort path        # sort by path
+$ fastfind "*" --sort name -r     # reverse order
+.fi
 
-.TP
-.B -c, --count
-Only print the number of matches.
+.SH ACTIONS
 
-.TP
-.B --stats
-Display search statistics.
+Execute commands on each match:
 
-.TP
-.B --exec CMD
-Execute a command for each match. The placeholder
-.B {}
-is replaced with the file path.
+.PP
+.nf
+$ fastfind "*.log" --exec "gzip {}"     # compress each log file
+$ fastfind "*.tmp" --exec "rm {}"       # delete temp files
+.fi
+
+The {} placeholder is replaced with the file path.
+
+.SH NATURAL LANGUAGE QUERIES (BETA)
+
+Fastfind can interpret simple natural language queries:
+
+.PP
+.nf
+$ fastfind "python files modified this week"
+$ fastfind "large log files bigger than 10MB"
+$ fastfind "text files containing TODO in ~/projects"
+$ fastfind "images older than 30 days"
+.fi
+
+This feature is experimental (BETA) and may not handle all queries perfectly.
 
 .SH INTERACTIVE MODE
-.TP
-.B --interactive
-Start a live interactive search interface.
 
-.TP
-.B --select
-Interactively select results.
+For exploratory searching, use interactive mode:
 
-.SH INDEX
-.TP
-.B --use-index
-Search using a cached index.
+.PP
+.nf
+$ fastfind --interactive
+.fi
 
-.TP
-.B --rebuild-index
-Rebuild the index.
-
-.TP
-.B --index-status
-Show index information.
-
-.SH MISC
-.TP
-.B -h, --help
-Show help.
-
-.TP
-.B --version
-Show version information.
-
-.TP
-.B -v, --verbose
-Verbose output.
-
-.TP
-.B -q, --quiet-errors
-Suppress error messages.
+This opens a terminal UI where you can type queries and see results update in real-time. Use arrow keys to navigate, Enter to select.
 
 .SH EXAMPLES
-Find Rust files in a source directory (use ff, or fastfind depending on what you have it under):
 
+.SS Common Use Cases
+
+Find all Python files in a project:
+
+.PP
 .nf
-fastfind "*.rs" src/
-.fi
-
-Search for files containing TODO:
-
-.nf
-fastfind --contains "TODO"
-.fi
-
-Execute a command on each match:
-
-.nf
-fastfind "*.log" --exec "gzip {}"
+$ fastfind "*.py" ~/projects/myapp
 .fi
 
 Find recently modified files:
 
+.PP
 .nf
-fastfind --recent
+$ fastfind --recent
+$ fastfind --changed 1d
 .fi
 
-Search for a function definition:
+Find and operate on files:
 
+.PP
 .nf
-fastfind --function main
+$ fastfind "*.log" --exec "gzip {}"      # compress logs
+$ fastfind "*.bak" --exec "rm {}"        # remove backups
+$ fastfind -t d "node_modules" --exec "rm -rf {}"  # remove dirs
 .fi
 
-Use fuzzy matching:
+Find files containing text:
 
+.PP
 .nf
-fastfind --fuzzy config
+$ fastfind "*.py" --contains "TODO"
+$ fastfind "*.js" --contains "export default"
 .fi
+
+Find large files:
+
+.PP
+.nf
+$ fastfind "*" --size >100M --sort size -r
+.fi
+
+Use with other tools:
+
+.PP
+.nf
+$ fastfind "*.py" | xargs wc -l              # count lines
+$ fastfind "*.rs" | rg "fn main"             # search content
+$ fastfind -0 "*.txt" | xargs -0 rm          # safe deletion
+.fi
+
+.SH PERFORMANCE COMPARISON
+
+Typical performance on large directory trees:
+
+.PP
+.nf
+# Simple recursive listing - fastfind excels here
+time fastfind "*" /path/to/large/tree   # ~0.5s
+time fd . /path/to/large/tree          # ~0.3s (reference)
+
+# With complex filtering - parallel mode may help
+time fastfind "*" /path -j 8 --contains "pattern"
+.fi
+
+.SH ENVIRONMENT
+
+.TP
+.B HOME
+User home directory, used for .gitignore discovery.
+
+.TP
+.B XDG_CONFIG_HOME
+Additional configuration directory.
+
+.SH FILES
+
+.TP
+~/.config/fastfind/config
+User configuration (if exists).
+
+.SH EXIT STATUS
+
+.IP 0 4
+Success - at least one match found.
+.IP 1 4
+No matches found.
+.IP 2 4
+Error - invalid arguments, filesystem error, or other failure.
+
+.SH LIMITATIONS
+
+Note that fastfind is still early in development (BETA software). Some limitations apply:
+
+.IP \(bu 2
+The parallel mode (-j) is slower than single-threaded for simple listings.
+.IP \(bu
+Natural language queries are experimental.
+.IP \(bu
+Some edge cases in gitignore handling may not work perfectly.
+.IP \(bu
+The index mode is not yet fully implemented.
+
+.SH REPORTING BUGS
+
+Report bugs and feature requests at:
+https://github.com/RobertFlexx/fastfind/issues
 
 .SH SEE ALSO
-fd(1), rg(1), find(1)
+
+.BR fd (1),
+.BR rg (1),
+.BR find (1),
+.BR locate (1)
+
+Fastfind is similar to fd (rust) in spirit but written in Nim. For use cases where fd excels (complex filtering, better git integration), fd may be preferable. For simple recursive listing with globs, fastfind provides comparable or better performance.
 
 .SH AUTHOR
-Robert Flexx
+
+Written by RobertFlexx.
+
+.SH LICENSE
+
+MIT License - see LICENSE file for details.
+https://github.com/RobertFlexx/fastfind/blob/main/LICENSE

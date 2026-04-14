@@ -25,6 +25,7 @@ type
     fixed*: seq[string]
     effectiveIC*: bool
     optGlobs*: seq[OptGlob]
+    matchAll*: bool
 
   Excluder* = object
     ignoreCase*: bool
@@ -277,6 +278,11 @@ proc compile*(m: var Matcher) =
   m.compiled.setLen(0)
   m.fixed.setLen(0)
   m.optGlobs.setLen(0)
+  m.matchAll = false
+
+  if m.mode == mmGlob and m.patterns.len == 1 and m.patterns[0] == "*":
+    m.matchAll = true
+    return
 
   case m.mode
   of mmFixed:
@@ -312,6 +318,7 @@ proc matchWithCase(m: Matcher; og: OptGlob; t, target: string): bool =
   false
 
 proc anyMatch*(m: Matcher; baseName, fullRelPath: string): bool =
+  if m.matchAll: return true
   if m.patterns.len == 0: return true
   
   let target = if m.pathMode == pmFullPath: fullRelPath else: baseName

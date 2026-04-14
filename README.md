@@ -1,4 +1,4 @@
-# fastfind 2.0.0 (Major performance overhaul!)
+# fastfind 2.1.0
 
 ## Modern replacement for `find`, with more features than fd but slightly different performance characteristics.
 
@@ -19,6 +19,43 @@ Interactive fuzzy search:
 ```
 ff --interactive
 ```
+
+---
+
+## Performance Benchmarks
+
+| Command | Time | Notes |
+|---------|------|-------|
+| `ff "*" /` | ~0.54s | Fastest mode (single-thread) |
+| `ff "*" / -H` | ~0.71s | With hidden files |
+| `ff "*" / -j 8` | ~1.2s | Parallel mode (slower!) |
+| `fd . /` | ~0.30s | Reference |
+| `fd . / -H` | ~0.36s | Reference with hidden |
+
+**Key insight:** The single-thread fast path is faster than parallel mode. Use default (no `-j` flag) for best performance.
+
+### Parallel Mode Performance
+
+**Important:** The parallel mode (`-j N`) is generally *slower* than single-thread for simple recursive listing. This is because:
+
+1. **Threading overhead** - Parallel mode adds synchronization overhead that hurts performance for simple recursive listing
+2. **I/O-bound workload** - Directory traversal is I/O-limited, not CPU-limited; threading doesn't help
+3. **Per-entry allocations** - Parallel path does more string allocation
+
+| Configuration | Time | Recommendation |
+|---------------|------|----------------|
+| Default (no `-j`) | ~0.54s | **Recommended** |
+| `-j 1` | ~0.54s | Same as default |
+| `-j 4` | ~1.4s | Slower |
+| `-j 8` | ~1.2s | Slower |
+
+**When to use parallel mode:**
+- Content search (`--contains`)
+- Complex regex patterns
+- Heavy filtering workloads
+- When CPU work per file is high
+
+For simple filename search, always use the default (no `-j` flag).
 
 ---
 
@@ -250,6 +287,36 @@ If `ff` runs successfully, the issue is resolved.
 
 > **Note for developers:** Rebuild without PCRE1 dependency or use static builds. Consider migrating away from runtime `dlopen` of PCRE1.
 
+### Scanning Root Directory Performance Issue
+
+When scanning `/` (root directory), `ff` may find fewer files and run slower compared to `fd`:
+
+```
+$ time ff . / -j 8 -H | wc     # ~690k files
+$ time fd . / | wc            # ~1.1M files
+```
+
+**Root Cause:** The code has several issues when scanning large directory trees like `/`:
+
+1. **Gitignore overhead:** When `--gitignore` is enabled (default on home directories), it searches for `.git` repositories from the root up, adding processing overhead.
+2. **Pattern matching with large result sets:** When searching for `.` (match all), the matcher still iterates through all patterns for every file.
+3. **Missing `/proc`, `/sys`, `/dev` handling:** Special files in `/proc`, `/sys`, `/dev` may cause errors or get skipped inconsistently.
+
+**Workaround:** Use specific patterns instead of `.` to match all files:
+
+```bash
+ff "*" /     # Explicit glob pattern
+ff --glob "*" /   # More explicit
+```
+
+Or exclude problematic paths:
+
+```bash
+ff "*" / --exclude "/proc/*" --exclude "/sys/*" --exclude "/dev/*"
+```
+
+**Note:** This issue may be more pronounced with threading enabled (`-j`). Future versions should optimize for the "match all" case and handle system directories better.
+
 ## Quick start
 
 ```bash
@@ -336,94 +403,79 @@ fastfind provides:
 
 ## Performance and speed
 
-**fastfind 2.0.0** is now significantly faster than fd in most benchmarks!
-
 All measurements below were run by executing commands repeatedly on the same local dataset.
 
 Benchmark dataset:
 
 * 20,000 files across 100 directories
-* File types: `.txt` (10,000), `.py` (3,000), `.js` (2,000)
-* Tests run with `--warmup 3 --runs 20` using hyperfine on RHEL 10.1
+* Tests run with `--warmup 3 --runs 20` using hyperfine
 
 System specs:
 
 * OS: Linux `6.19.12-1.el10.elrepo.x86_64` (Red Hat Enterprise Linux 10.1)
 * CPU: Intel Core i7-9700 (8 cores @ 3.00GHz)
 * RAM: 16 GB DDR4
-* Tool versions: `ff 2.0.0 (optimized build)`, `fd 10.4.2`, `find 4.9.0`
+* Tool versions: `ff 2.1.0`, `fd 10.4.2`, `find 4.9.0`
 
 ---
 
 ### Glob Patterns
 
-| Pattern | ff (ms) | fd (ms) | ff vs fd |
-|---------|--------:|--------:|----------|
-| `*.txt` | **6.8** | 10.4 | **+52% faster** |
-| `*.py` | **6.3** | 9.7 | **+54% faster** |
-| `*.js` | **6.4** | 9.9 | **+55% faster** |
+| Pattern | ff (ms) | fd (ms) | find (ms) | Winner |
+|---------|--------:|--------:|----------:|--------|
+| `*.txt` | 8.1 | 7.5 | 10.4 | fd (+8% faster) |
+| All files (`*`) | 14.6 | 7.1 | 7.3 | fd (2x faster) |
 
-### Fixed Strings
+### With Type Filter
 
-| Pattern | ff (ms) | fd (ms) | ff vs fd |
-|---------|--------:|--------:|----------|
-| `file_` | **6.8** | 10.3 | **+51% faster** |
-| `app_` | **6.1** | 9.4 | **+54% faster** |
+| Pattern | ff (ms) | fd (ms) | find (ms) | Winner |
+|---------|--------:|--------:|----------:|--------|
+| `*.txt -t f` | 12.4 | 7.2 | 10.7 | fd (+72% faster) |
 
-### Complex Patterns
+### Content Search
 
-| Pattern | ff (ms) | fd (ms) | ff vs fd |
-|---------|--------:|--------:|----------|
-| `*file_*.txt` | **17.2** | 10.4 | -66% slower |
+| Command | ff (ms) | fd+grep (ms) | find+grep (ms) | Winner |
+|---------|--------:|-------------:|---------------:|--------|
+| `*.py --contains TODO` | 11.5 | 7.4 | 11.6 | fd (+56% faster) |
 
-### Specific Directory
+### Regex Patterns
 
-| Pattern | ff (ms) | fd (ms) | ff vs fd |
-|---------|--------:|--------:|----------|
-| `*.txt` in `dir_0/` | **3.4** | 17.0 | **5x faster** |
+| Pattern | ff (ms) | fd (ms) | find (ms) | Winner |
+|---------|--------:|--------:|----------:|--------|
+| `.*\.txt$` | 15.2 | 7.3 | 10.6 | fd (2x faster) |
 
-### vs find
+### Single-thread vs Parallel
 
-| Pattern | ff (ms) | find (ms) | ff vs find |
-|---------|--------:|---------:|----------|
-| `*.txt` | **6.8** | 13.0 | **+90% faster** |
+| Command | Time (ms) | Notes |
+|---------|----------:|-------|
+| `ff "*"` (default) | 14.6 | **Fastest** |
+| `ff "*" -j 4` | 22.7 | 55% slower |
+| `ff "*" -j 8` | 22.9 | 56% slower |
 
 ---
 
 ### Summary
 
-- **ff is 50-55% faster than fd** on simple glob and fixed patterns
-- **5x faster** on small directories
-- **50-90% faster** than find
-- **Only caveat**: Complex glob patterns (`*pattern*`) are slower than fd (fd has better regex optimization)
+- **fd is faster** - particularly for glob patterns and all-files traversal (2x faster)
+- **ff single-thread** - faster than ff parallel mode (use default, no `-j`)
+- **ff built-in content search** - simpler than fd+grep pipeline (but slower)
+- **find** - surprisingly competitive for simple patterns
 
-### Verified Correctness
+| Operation | Recommendation |
+|-----------|----------------|
+| Simple glob (`*.txt`) | `fd --glob` or `find -name` |
+| All files | `fd .` |
+| Content search | `fd --glob \| xargs grep` (faster) or `ff --contains` (simpler) |
+| Parallel work | `fd` (better implementation) |
 
-All output counts verified identical between ff, fd, and find:
-- `*.txt`: 15,102 matches ✓
-- `*.py`: 3,000 matches ✓
-
-#### Key Observations
-
-* **fd is faster** - particularly in parallel mode (uses efficient parallel traversal)
-* **Single-thread**: ff is ~3% slower than fd single-threaded
-* **Parallel mode**: fd is ~75% faster than ff with threads enabled
-* **Output verified**: ff returns identical results to fd and find
-* **find is surprisingly fast** for simple glob patterns
-
-#### Why fd is faster
-
-fd uses highly optimized parallel directory traversal with efficient work distribution.
-ff has more overhead in pattern matching and result collection.
-
-#### What ff does better than fd:
+### What ff does better than fd:
 
 * Built-in content search (no external grep needed)
 * Natural language queries (`"python files modified this week"`)
 * Fuzzy matching
 * Semantic symbol search
 * More flexible filtering options
-* No dependencies (static binary)
+* No dependencies (static binary available)
 
 ## Semantic code search
 

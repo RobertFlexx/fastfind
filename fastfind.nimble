@@ -1,6 +1,6 @@
 # fastfind.nimble - Nim utility: fast file finder
 
-version       = "2.0.0"
+version       = "2.1.0"
 author        = "RobertFlexx"
 description   = "fastfind: a fast, feature-rich file finder with fuzzy search, interactive terminal UI, and git awareness."
 license       = "MIT"

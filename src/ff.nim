@@ -255,12 +255,17 @@ when isMainModule:
 
   else:
     var matched = 0
+    var outputBuf = newStringOfCap(262144)
     let stats =
       if cfg.outputMode == omPlain:
         runSearchStreamPaths(cfg,
           proc(p: string) =
             inc matched
-            stdout.writeLine(p)
+            outputBuf.add(p)
+            outputBuf.add('\n')
+            if outputBuf.len > 262140:
+              stdout.write(outputBuf)
+              outputBuf.setLen(0)
         )
       else:
         runSearchStream(cfg,
@@ -268,6 +273,9 @@ when isMainModule:
             inc matched
             emitOne(cfg, m)
         )
+
+    if outputBuf.len > 0:
+      stdout.write(outputBuf)
 
     if matched == 0:
       if cfg.naturalQuery.len > 0:
