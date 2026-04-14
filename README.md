@@ -202,6 +202,54 @@ On Arch, `pcre` is available but deprecated upstream; new builds should prefer P
 
 > **Tip**: Using static builds from the release page avoids this dependency issue entirely.
 
+### RHEL 10 / EL10 PCRE Issue
+
+If you encounter this error on RHEL 10, EL10, or modern Fedora-like systems:
+
+```
+could not load: libpcre.so(.3|.1|)
+```
+
+**Root Cause:** The binary depends on legacy PCRE1 (`libpcre.so.1` / `libpcre.so.3`). RHEL 10+ and similar distributions no longer provide PCRE1 in default repositories. Installing `pcre2` does NOT fix the issue because it is ABI-incompatible.
+
+**Workaround with Homebrew (Linuxbrew):**
+
+1. Install PCRE:
+   ```bash
+   brew install pcre
+   ```
+
+2. Run with the library path:
+   ```bash
+   LD_LIBRARY_PATH=/home/linuxbrew/.linuxbrew/lib ff
+   ```
+
+**Permanent Fix:**
+
+- **Option A:** Add to your shell config (`~/.bashrc`, `~/.zshrc`, etc.):
+  ```bash
+  export LD_LIBRARY_PATH=/home/linuxbrew/.linuxbrew/lib:$LD_LIBRARY_PATH
+  ```
+
+- **Option B (recommended):** Create a wrapper script:
+  ```bash
+  sudo mv /usr/local/bin/ff /usr/local/bin/ff.real
+  sudo tee /usr/local/bin/ff >/dev/null <<'EOF'
+  #!/usr/bin/env bash
+  export LD_LIBRARY_PATH=/home/linuxbrew/.linuxbrew/lib:${LD_LIBRARY_PATH:-}
+  exec /usr/local/bin/ff.real "$@"
+  EOF
+  sudo chmod +x /usr/local/bin/ff
+  ```
+
+**Verification:**
+```bash
+LD_LIBRARY_PATH=/home/linuxbrew/.linuxbrew/lib ff
+```
+If `ff` runs successfully, the issue is resolved.
+
+> **Note for developers:** Rebuild without PCRE1 dependency or use static builds. Consider migrating away from runtime `dlopen` of PCRE1.
+
 ## Quick start
 
 ```bash
