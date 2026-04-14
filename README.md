@@ -59,7 +59,7 @@ For simple filename search, always use the default (no `-j` flag).
 
 ---
 
-## Modern replacement of `find`, focused on speed and sane defaults.
+## Below is more information on fastfind. Read below to learn how to install, use, and/or compile this software.
 
 Cross-platform, single binary, zero runtime dependencies (written in Nim).
 
