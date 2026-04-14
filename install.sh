@@ -39,6 +39,8 @@ TMP_MAN=""
 VERSION=""
 USE_LATEST_REDIRECT=0
 RELEASE_JSON=""
+SELECTED_ASSET_URL=""
+SELECTED_ASSET_SHA256=""
 
 supports_color() {
   [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-}" != "dumb" ]
@@ -303,6 +305,46 @@ detect_libc() {
   fi
 }
 
+file_sha256_hex() {
+  local file="$1"
+
+  if has_cmd sha256sum; then
+    sha256sum "$file" | awk '{print $1}'
+  elif has_cmd shasum; then
+    shasum -a 256 "$file" | awk '{print $1}'
+  elif has_cmd openssl; then
+    openssl dgst -sha256 "$file" | awk '{print $NF}'
+  else
+    die "sha256sum, shasum, or openssl is required for SHA-256 verification"
+  fi
+}
+
+lookup_asset_sha256() {
+  local url="$1"
+
+  [ -n "$RELEASE_JSON" ] || return 0
+  has_cmd python3 || return 0
+
+  printf "%s" "$RELEASE_JSON" | python3 - "$url" <<'PY'
+import json
+import sys
+
+want = sys.argv[1]
+try:
+    release = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(0)
+
+for asset in release.get("assets") or []:
+    if asset.get("browser_download_url") != want:
+        continue
+    digest = asset.get("digest") or ""
+    if isinstance(digest, str) and digest.startswith("sha256:"):
+        print(digest.split(":", 1)[1])
+    raise SystemExit(0)
+PY
+}
+
 extract_tag_name() {
   local json="${1:-}"
   if [ -z "$json" ]; then
@@ -314,7 +356,7 @@ extract_tag_name() {
 extract_browser_download_urls() {
   printf "%s" "$1" | grep -oE 'https://github\.com/[^"]+/releases/download/[^"]+' | sort -u
 }
-
+# below is bullshit
 arch_token_matches() {
   local base="$1"
   case "$ARCH" in
@@ -415,11 +457,12 @@ list_binary_download_urls_ordered() {
   local libc=""
   libc="$(detect_libc)"
 
-  if [ -n "$RELEASE_JSON" ]; then
-    order_urls_by_release_score "$RELEASE_JSON" "$libc"
-  fi
-
-  synthetic_binary_urls "$libc" | awk '!seen[$0]++'
+  {
+    if [ -n "$RELEASE_JSON" ]; then
+      order_urls_by_release_score "$RELEASE_JSON" "$libc"
+    fi
+    synthetic_binary_urls "$libc"
+  } | awk '!seen[$0]++'
 }
 
 resolve_release() {
@@ -611,24 +654,52 @@ render_header() {
 download_binary() {
   local url=""
   local tried=0
+  local actual_sha=""
+  local verified=0
+
+  SELECTED_ASSET_URL=""
+  SELECTED_ASSET_SHA256=""
 
   step "downloading ${SECONDARY_NAME} for ${OS}/${ARCH}"
 
   while IFS= read -r url; do
     [ -n "$url" ] || continue
     tried=1
-    if download_file "$url" "$TMP_BIN" 2>/dev/null && [ -s "$TMP_BIN" ]; then
-      chmod 755 "$TMP_BIN"
-      okay "binary downloaded"
-      return 0
+
+    if ! download_file "$url" "$TMP_BIN" 2>/dev/null || [ ! -s "$TMP_BIN" ]; then
+      continue
     fi
+
+    SELECTED_ASSET_URL="$url"
+    SELECTED_ASSET_SHA256="$(lookup_asset_sha256 "$url" || true)"
+
+    if [ -n "$SELECTED_ASSET_SHA256" ]; then
+      actual_sha="$(file_sha256_hex "$TMP_BIN")"
+      if [ "$actual_sha" != "$SELECTED_ASSET_SHA256" ]; then
+        warn "SHA-256 mismatch for ${url##*/}; expected ${SELECTED_ASSET_SHA256}, got ${actual_sha}"
+        rm -f "$TMP_BIN"
+        SELECTED_ASSET_URL=""
+        SELECTED_ASSET_SHA256=""
+        continue
+      fi
+      verified=1
+    fi
+
+    chmod 755 "$TMP_BIN"
+    if [ "$verified" -eq 1 ]; then
+      okay "binary downloaded and SHA-256 verified"
+    else
+      warn "binary downloaded, but no SHA-256 digest was available in release metadata"
+      okay "binary downloaded"
+    fi
+    return 0
   done <<< "$(list_binary_download_urls_ordered)"
 
   if [ "$tried" -eq 0 ]; then
     die "no candidate download URLs were generated for ${PLATFORM_LABEL}. See $(releases_page_url)"
   fi
 
-  die "failed to download a matching release asset for ${PLATFORM_LABEL}. See $(releases_page_url)"
+  die "failed to download a matching and valid release asset for ${PLATFORM_LABEL}. See $(releases_page_url)"
 }
 
 download_manpage() {
@@ -692,7 +763,7 @@ install_manpages() {
   [ "$INSTALL_MANPAGES" -eq 1 ] || return 0
 
   local primary_man="${MAN_DIR}/${PRIMARY_MANPAGE}"
-  local secondary_man="${MAN_DIR}/${SECONDARY_MANPAGE}"
+  local secondary_man="${MAN_DIR}/${SECONDARY_MANPAGE}" # bash is really fun guys
 
   step "installing manpages"
   ensure_dir "$MAN_DIR"
@@ -771,6 +842,13 @@ verify_install() {
   [ -x "$primary_path" ] || die "primary binary was not installed correctly"
   [ -L "$secondary_path" ] || die "secondary alias was not installed correctly"
 
+  if [ -n "$SELECTED_ASSET_SHA256" ]; then
+    local installed_sha=""
+    installed_sha="$(file_sha256_hex "$primary_path")"
+    [ "$installed_sha" = "$SELECTED_ASSET_SHA256" ] || die "installed binary SHA-256 verification failed"
+    okay "installed binary SHA-256 verified"
+  fi
+
   version_out="$("$primary_path" --version 2>/dev/null || true)"
   if [ -n "$version_out" ]; then
     okay "$version_out"
@@ -827,6 +905,9 @@ show_summary() {
   if [ "$INSTALL_MANPAGES" -eq 1 ]; then
     printf "%b\n" "${C_DIM}man:${C_RESET}      ${MAN_DIR}/${PRIMARY_MANPAGE}"
     printf "%b\n" "${C_DIM}man:${C_RESET}      ${MAN_DIR}/${SECONDARY_MANPAGE}"
+  fi
+  if [ -n "$SELECTED_ASSET_SHA256" ]; then
+    printf "%b\n" "${C_DIM}sha256:${C_RESET}   ${SELECTED_ASSET_SHA256}"
   fi
   printf "\n"
   printf "%s\n" "Try:"
