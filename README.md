@@ -1,61 +1,188 @@
-# fastfind 2.1.0
+## Performance Benchmarks
 
-## Modern replacement for `find`, with more features than fd but slightly different performance characteristics.
+fastfind is designed to be a modern, feature-rich alternative to traditional tools like `find` and `fd`. It prioritizes flexibility and capability while still aiming for strong performance.
 
-Find Nim files:
+### Full System Scan (root `/`)
 
-```
-ff "*.nim"
-```
+| Command       | Time   | Files Found | Notes                           |
+| ------------- | ------ | ----------: | ------------------------------- |
+| `ff "*" /`    | ~0.53s |      ~1.09M | Fastest ff mode (single-thread) |
+| `ff "*" / -H` | ~0.71s |      ~1.39M | Includes hidden files           |
+| `fd . /`      | ~0.27s |      ~1.09M | Extremely optimized baseline    |
+| `fd . / -H`   | ~0.36s |      ~1.09M | Hidden files                    |
 
-Find Python files changed in the last day containing TODO:
+### Key Observations
 
-```
-ff "*.py" --changed 1d --contains TODO
-```
-
-Interactive fuzzy search:
-
-```
-ff --interactive
-```
+* `fd` is faster (about 2× for raw traversal)
+* `ff` finds slightly more files when using `-H`, due to differences in how hidden or system paths like `/proc` and `/sys` are handled
+* `ff` single-thread mode is the fastest mode. Parallel (`-j`) adds overhead for simple workloads
 
 ---
 
-## Performance Benchmarks
+## Why fd is fast (and deserves credit)
 
-| Command | Time | Notes |
-|---------|------|-------|
-| `ff "*" /` | ~0.54s | Fastest mode (single-thread) |
-| `ff "*" / -H` | ~0.71s | With hidden files |
-| `ff "*" / -j 8` | ~1.2s | Parallel mode (slower!) |
-| `fd . /` | ~0.30s | Reference |
-| `fd . / -H` | ~0.36s | Reference with hidden |
+fd is an extremely well-optimized tool written in Rust with:
 
-**Key insight:** The single-thread fast path is faster than parallel mode. Use default (no `-j` flag) for best performance.
+* A highly tuned filesystem walker (`ignore` crate)
+* Very low allocation overhead
+* Efficient use of OS directory APIs
+* Years of refinement and real-world usage
 
-### Parallel Mode Performance
+For pure filename traversal, `fd` is genuinely hard to beat.
 
-**Important:** The parallel mode (`-j N`) is generally *slower* than single-thread for simple recursive listing. This is because:
+---
 
-1. **Threading overhead** - Parallel mode adds synchronization overhead that hurts performance for simple recursive listing
-2. **I/O-bound workload** - Directory traversal is I/O-limited, not CPU-limited; threading doesn't help
-3. **Per-entry allocations** - Parallel path does more string allocation
+## Why fastfind exists
 
-| Configuration | Time | Recommendation |
-|---------------|------|----------------|
-| Default (no `-j`) | ~0.54s | **Recommended** |
-| `-j 1` | ~0.54s | Same as default |
-| `-j 4` | ~1.4s | Slower |
-| `-j 8` | ~1.2s | Slower |
+fastfind is not trying to replace fd. It is trying to extend what file search tools can do.
 
-**When to use parallel mode:**
-- Content search (`--contains`)
-- Complex regex patterns
-- Heavy filtering workloads
-- When CPU work per file is high
+Where fd focuses on speed and simplicity, ff focuses on:
 
-For simple filename search, always use the default (no `-j` flag).
+* Doing more in one command
+* Reducing the need for pipelines
+* Adding smarter, higher-level capabilities
+
+---
+
+## What fastfind does differently
+
+fastfind aims to combine multiple tools into one:
+
+* `find` is powerful but complex
+* `fd` is fast and simple
+* `fzf` is great for filtering but not a crawler
+
+fastfind sits between them:
+
+* one command
+* more features
+* still reasonably fast
+
+---
+
+## Strengths of fastfind
+
+fastfind holds its own while offering features that go beyond fd:
+
+* Built-in content search (`--contains`)
+  no grep pipeline needed
+
+* Natural language queries (BETA)
+  `"python files modified this week"`
+
+* Fuzzy matching
+  no need for `fzf` in simple cases
+
+* Semantic code search
+  `--function`, `--class`, `--symbol`
+
+* Interactive mode
+  built-in selection UI
+
+* Index-based search (optional)
+  faster repeated queries
+
+* Single static binary
+  minimal dependencies
+
+---
+
+## Performance Philosophy
+
+fastfind is built around a simple idea:
+
+> Do the least amount of work possible per file.
+
+This led to key optimizations:
+
+* universal `*` fast path
+* matcher bypass (`matchAll`)
+* pattern match before `stat`
+* early continue for non-matches
+* buffer reuse (avoid allocations)
+* buffered output (reduce syscalls)
+* local variable hoisting
+
+The result:
+
+* about 2× speedup from initial versions
+* competitive performance for a feature-rich tool
+* strong single-thread efficiency
+
+---
+
+## Parallel Mode (`-j`)
+
+Parallel mode exists, but:
+
+* it is not always faster
+* for simple traversal, it is often slower
+
+Why:
+
+* filesystem traversal is I/O-bound
+* thread coordination adds overhead
+* per-entry work is too small to benefit
+
+### When parallel helps
+
+Use `-j` when:
+
+* content search (`--contains`)
+* complex filtering
+* regex-heavy workloads
+* CPU-heavy per-file processing
+
+### When to avoid it
+
+* simple `*` or glob scans
+* full filesystem listing
+* lightweight queries
+
+---
+
+## When to use each tool
+
+| Scenario                       | Recommendation |
+| ------------------------------ | -------------- |
+| Pure speed (file listing)      | `fd`           |
+| Rich filtering or features     | `ff`           |
+| Content search (simple)        | `ff`           |
+| Content search (max speed)     | `fd + grep`    |
+| Fuzzy search without pipelines | `ff`           |
+| Interactive pipelines          | `fzf`          |
+
+---
+
+## Vision
+
+fastfind is not trying to beat fd at its own game.
+
+Instead, the goal is:
+
+> A single, powerful search tool that reduces the need for chaining multiple tools together.
+
+The long-term vision:
+
+* close more of the performance gap where possible
+* keep the hot path efficient and predictable
+* expand higher-level search capabilities
+* make advanced queries easier and more natural
+* stay fast enough to feel instant in real workflows
+
+In short:
+
+* fd = speed and simplicity
+* ff = capability, flexibility, and still fast
+
+---
+
+## Final Take
+
+* fd is faster, and that is expected
+* ff is more capable, and that is intentional
+
+fastfind is about doing more with one command, without giving up too much performance.
 
 ---
 
@@ -291,35 +418,28 @@ If `ff` runs successfully, the issue is resolved.
 
 > **Note for developers:** Rebuild without PCRE1 dependency or use static builds. Consider migrating away from runtime `dlopen` of PCRE1.
 
-### Scanning Root Directory Performance Issue
+### Scanning Root Directory
 
-When scanning `/` (root directory), `ff` may find fewer files and run slower compared to `fd`:
+Both `ff` and `fd` handle full system traversal well. Here's what to expect:
 
 ```
-$ time ff . / -j 8 -H | wc     # ~690k files
-$ time fd . / | wc            # ~1.1M files
+$ time ff "*" / | wc     # ~1.09M files (0.58s)
+$ time fd . / | wc       # ~1.09M files (0.26s)
 ```
 
-**Root Cause:** The code has several issues when scanning large directory trees like `/`:
+Key points:
+- **fd** is ~2x faster for pure traversal (highly optimized Rust implementation)
+- **ff** finds comparable file counts (uses similar directory traversal)
+- **ff with `-H`** finds more files (~1.39M) due to slightly different hidden file handling
 
-1. **Gitignore overhead:** When `--gitignore` is enabled (default on home directories), it searches for `.git` repositories from the root up, adding processing overhead.
-2. **Pattern matching with large result sets:** When searching for `.` (match all), the matcher still iterates through all patterns for every file.
-3. **Missing `/proc`, `/sys`, `/dev` handling:** Special files in `/proc`, `/sys`, `/dev` may cause errors or get skipped inconsistently.
-
-**Workaround:** Use specific patterns instead of `.` to match all files:
+For best performance, use explicit glob patterns:
 
 ```bash
-ff "*" /     # Explicit glob pattern
-ff --glob "*" /   # More explicit
+ff "*" /          # Explicit glob (fastest for ff)
+ff --glob "*" /   # Same, more explicit
 ```
 
-Or exclude problematic paths:
-
-```bash
-ff "*" / --exclude "/proc/*" --exclude "/sys/*" --exclude "/dev/*"
-```
-
-**Note:** This issue may be more pronounced with threading enabled (`-j`). Future versions should optimize for the "match all" case and handle system directories better.
+Note: ff's single-thread mode is actually faster than parallel mode (`-j`) for simple traversal. Use default (no `-j`) for best results.
 
 ## Quick start
 
