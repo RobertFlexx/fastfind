@@ -59,6 +59,10 @@ For simple filename search, always use the default (no `-j` flag).
 
 ---
 
+***[Changelogs for 2.1.0](https://github.com/RobertFlexx/fastfind/blob/main/CHANGELOG.md)***
+
+---
+
 ## Below is more information on fastfind. Read below to learn how to install, use, and/or compile this software.
 
 Cross-platform, single binary, zero runtime dependencies (written in Nim).
