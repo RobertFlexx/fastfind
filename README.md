@@ -74,6 +74,16 @@ For some BSDs or Linux Distributions:
 curl -fsSL https://raw.githubusercontent.com/RobertFlexx/fastfind/main/install.sh | sh
 ```
 
+### Update
+
+Update to the latest version:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/RobertFlexx/fastfind/main/update.sh | bash
+```
+
+* The update script checks your current version and only downloads if there's a new release.
+
 * DISCLAIMER: binaries for other OSes, or musl libc Linux distributions may not ALWAYS be available. Primarily glibc Linux with architecture x86_64.
 * HINT: there are dynamic binaries for: FreeBSD[amd64], OpenBSD[amd64], NetBSD[amd64], Darwin[arm64], Linux[glibc, amd64] (may not be immediately available for newly released versions)
 ### Or build from source (recommended for best performance)
