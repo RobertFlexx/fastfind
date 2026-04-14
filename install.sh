@@ -16,7 +16,7 @@ FORCE_LOCAL=0
 PREFIX_EXPLICIT=0
 BIN_DIR_EXPLICIT=0
 MAN_DIR_EXPLICIT=0
-REPO="$REPO_DEFAULT"
+REPO="${REPO:-$REPO_DEFAULT}"
 REQUESTED_TAG=""
 PREFIX="$DEFAULT_SYSTEM_PREFIX"
 BIN_DIR=""
@@ -38,6 +38,9 @@ TMP_BIN=""
 TMP_MAN=""
 VERSION=""
 USE_LATEST_REDIRECT=0
+RELEASE_JSON=""
+SELECTED_ASSET_URL=""
+SELECTED_ASSET_SHA256=""
 
 supports_color() {
     [ -t 1 ] && [ "${NO_COLOR:-}" = "" ] && [ "${TERM:-}" != "dumb" ]
@@ -108,15 +111,22 @@ cleanup() {
 trap 'on_error $? $LINENO "$BASH_COMMAND"' ERR
 trap cleanup EXIT INT TERM
 
+releases_page_url() {
+    printf "https://github.com/%s/releases\n" "$REPO"
+}
+
 usage() {
     cat <<EOF
 ${C_BOLD}fastfind installer${C_RESET}
 
+Install prebuilt binaries from GitHub releases:
+  $(releases_page_url)
+
 Usage:
-  install-fastfind.sh [options]
+  install.sh [options]
 
 Options:
-  --repo <owner/repo>     GitHub repo to install from
+  --repo <owner/repo>     GitHub repo to install from (default: ${REPO_DEFAULT})
   --tag <tag>             Install a specific release tag
   --version <tag>         Same as --tag
   --prefix <dir>          Installation prefix
@@ -128,10 +138,10 @@ Options:
   -h, --help              Show this help
 
 Examples:
-  install-fastfind.sh
-  install-fastfind.sh --tag v0.2.1
-  install-fastfind.sh --prefix /opt/fastfind
-  install-fastfind.sh --force-local
+  curl -fsSL https://raw.githubusercontent.com/${REPO_DEFAULT}/main/install.sh | bash
+  install.sh --tag v1.0.0
+  install.sh --prefix /opt/fastfind
+  install.sh --force-local
 EOF
 }
 
@@ -296,27 +306,232 @@ download_file() {
     esac
 }
 
-extract_tag_name() {
-    sed -n 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1
+file_sha256_hex() {
+    local f="$1"
+    if [ ! -f "$f" ]; then
+        printf ""
+        return 0
+    fi
+    if has_cmd sha256sum; then
+        sha256sum "$f" | awk '{print $1}'
+    elif has_cmd shasum; then
+        shasum -a 256 "$f" | awk '{print $1}'
+    elif has_cmd openssl; then
+        openssl dgst -sha256 "$f" | awk '{print $NF}'
+    else
+        printf ""
+    fi
 }
 
-resolve_release() {
-    if [ -n "$REQUESTED_TAG" ]; then
-        VERSION="$REQUESTED_TAG"
+normalize_release_version() {
+    printf "%s" "$1" | sed 's/^[vV]//'
+}
+
+installed_binary_version_token() {
+    local bin="$1"
+    local line=""
+    [ -x "$bin" ] || return 1
+    line="$("$bin" --version 2>/dev/null | head -n 1 || true)"
+    printf "%s" "$line" | sed -n 's/.*\([0-9][0-9.]*\).*/\1/p' | head -n 1
+}
+
+extract_tag_name() {
+    local json="${1:-}"
+    if [ -z "$json" ]; then
+        json="$(cat || true)"
+    fi
+    printf "%s" "$json" | tr -d '\n' | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1
+}
+
+extract_browser_download_urls() {
+    printf "%s" "$1" | grep -oE 'https://github\.com/[^"]+/releases/download/[^"]+' | sort -u
+}
+
+arch_token_matches() {
+    local base="$1"
+    case "$ARCH" in
+        amd64) echo "$base" | grep -qiE '(amd64|x86_64)' ;;
+        arm64) echo "$base" | grep -qiE '(arm64|aarch64)' ;;
+        arm) echo "$base" | grep -qiE '(armv7|armv7l|armhf)' ;;
+        386) echo "$base" | grep -qiE '(386|i686|i386)' ;;
+        *) return 1 ;;
+    esac
+}
+
+os_token_matches() {
+    local base="$1"
+    case "$OS" in
+        linux) echo "$base" | grep -qi 'linux' ;;
+        darwin) echo "$base" | grep -qiE '(darwin|macos|osx)' ;;
+        freebsd) echo "$base" | grep -qi 'freebsd' ;;
+        openbsd) echo "$base" | grep -qi 'openbsd' ;;
+        netbsd) echo "$base" | grep -qi 'netbsd' ;;
+        *) return 1 ;;
+    esac
+}
+
+score_release_asset_url() {
+    local url="$1" libc="$2"
+    local b score=0
+    b="$(printf "%s" "${url##*/}" | tr '[:upper:]' '[:lower:]')"
+
+    if ! os_token_matches "$b"; then
+        printf ""
+        return 0
+    fi
+    if ! arch_token_matches "$b"; then
+        printf ""
         return 0
     fi
 
-    local api_url="https://api.github.com/repos/${REPO}/releases/latest"
-    local json=""
+    case "$b" in
+        *.deb|*.rpm|*.tar*|*.zip|*.gz|*.sha256|*.asc|*.txt|*.json) printf ""; return 0 ;;
+    esac
+
+    score=500
+    case "$b" in
+        *"${SECONDARY_NAME}"-*) score=$((score - 20)) ;;
+        *"${PRIMARY_NAME}"-*) score=$((score + 0)) ;;
+    esac
+
+    if [ "$OS" = "linux" ]; then
+        case "$libc" in
+            musl)
+                case "$b" in
+                    *musl*) score=$((score - 200)) ;;
+                    *glibc*) score=$((score + 200)) ;;
+                    *) score=$((score - 50)) ;;
+                esac
+                ;;
+            *)
+                case "$b" in
+                    *glibc*) score=$((score - 200)) ;;
+                    *musl*) score=$((score + 150)) ;;
+                    *) score=$((score - 100)) ;;
+                esac
+                ;;
+        esac
+    fi
+
+    printf "%s" "$score"
+}
+
+order_urls_by_release_score() {
+    local json="$1" libc="$2"
+    local url="" score="" line=""
+    while IFS= read -r url; do
+        [ -n "$url" ] || continue
+        score="$(score_release_asset_url "$url" "$libc")"
+        [ -n "$score" ] || continue
+        printf "%s\t%s\n" "$score" "$url"
+    done <<< "$(extract_browser_download_urls "$json")" | LC_ALL=C sort -n | cut -f2-
+}
+
+synthetic_binary_urls() {
+    local libc="$1" vn="$VERSION"
+    if [ "$USE_LATEST_REDIRECT" -eq 1 ]; then
+        vn="latest"
+    fi
+
+    if [ "$OS" = "linux" ]; then
+        for base in "${SECONDARY_NAME}" "${PRIMARY_NAME}"; do
+            printf "%s\n" "https://github.com/${REPO}/releases/download/${vn}/${base}-linux-${libc}-${ARCH}"
+            printf "%s\n" "https://github.com/${REPO}/releases/download/${vn}/${base}-linux-${ARCH}"
+        done
+        if [ "$USE_LATEST_REDIRECT" -eq 1 ]; then
+            for base in "${SECONDARY_NAME}" "${PRIMARY_NAME}"; do
+                printf "%s\n" "https://github.com/${REPO}/releases/latest/download/${base}-linux-${libc}-${ARCH}"
+                printf "%s\n" "https://github.com/${REPO}/releases/latest/download/${base}-linux-${ARCH}"
+            done
+        fi
+    else
+        for base in "${SECONDARY_NAME}" "${PRIMARY_NAME}"; do
+            printf "%s\n" "https://github.com/${REPO}/releases/download/${vn}/${base}-${OS}-${ARCH}"
+        done
+        if [ "$USE_LATEST_REDIRECT" -eq 1 ]; then
+            for base in "${SECONDARY_NAME}" "${PRIMARY_NAME}"; do
+                printf "%s\n" "https://github.com/${REPO}/releases/latest/download/${base}-${OS}-${ARCH}"
+            done
+        fi
+    fi
+}
+
+list_binary_download_urls_ordered() {
+    local libc="" line=""
+    libc="$(detect_libc)"
+
+    if [ -n "$RELEASE_JSON" ]; then
+        while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            printf "%s\n" "$line"
+        done <<< "$(order_urls_by_release_score "$RELEASE_JSON" "$libc")"
+    fi
+
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        printf "%s\n" "$line"
+    done <<< "$(synthetic_binary_urls "$libc")" | awk '!seen[$0]++'
+}
+
+lookup_asset_sha256() {
+    local url="$1"
+    if [ -z "$RELEASE_JSON" ] || ! has_cmd python3; then
+        printf ""
+        return 0
+    fi
+    printf "%s" "$RELEASE_JSON" | python3 -c '
+import json, sys
+want = sys.argv[1]
+try:
+    j = json.load(sys.stdin)
+except json.JSONDecodeError:
+    sys.exit(0)
+for a in j.get("assets") or []:
+    if a.get("browser_download_url") == want:
+        d = a.get("digest") or ""
+        if isinstance(d, str) and d.startswith("sha256:"):
+            print(d.split(":", 1)[1])
+        break
+' "$url" 2>/dev/null || true
+}
+
+resolve_release() {
+    RELEASE_JSON=""
+    USE_LATEST_REDIRECT=0
+    local api_url="" json="" tag=""
+
+    if [ -n "$REQUESTED_TAG" ]; then
+        api_url="https://api.github.com/repos/${REPO}/releases/tags/$(printf "%s" "$REQUESTED_TAG" | sed "s/'/%27/g")"
+    else
+        api_url="https://api.github.com/repos/${REPO}/releases/latest"
+    fi
 
     if json="$(fetch_text "$api_url" 2>/dev/null)"; then
-        VERSION="$(printf "%s\n" "$json" | extract_tag_name)"
+        RELEASE_JSON="$json"
+        tag="$(extract_tag_name "$json")"
+        if [ -n "$tag" ]; then
+            VERSION="$tag"
+        elif [ -n "$REQUESTED_TAG" ]; then
+            VERSION="$REQUESTED_TAG"
+        fi
+    elif [ -n "$REQUESTED_TAG" ]; then
+        VERSION="$REQUESTED_TAG"
     fi
 
     if [ -z "$VERSION" ]; then
-        USE_LATEST_REDIRECT=1
-        VERSION="latest"
-        warn "could not resolve latest tag from GitHub API, using latest release redirect"
+        if [ -n "$REQUESTED_TAG" ]; then
+            VERSION="$REQUESTED_TAG"
+        else
+            VERSION="latest"
+        fi
+    fi
+
+    if [ -z "$RELEASE_JSON" ]; then
+        if [ -z "$REQUESTED_TAG" ]; then
+            USE_LATEST_REDIRECT=1
+            VERSION="latest"
+        fi
+        warn "could not fetch GitHub release metadata; trying constructed download URLs (${VERSION})"
     fi
 }
 
@@ -329,8 +544,9 @@ parse_args() {
                 REPO="$1"
                 ;;
             --tag|--version)
+                local _veropt="$1"
                 shift
-                [ "$#" -gt 0 ] || die "$1 requires a value"
+                [ "$#" -gt 0 ] || die "${_veropt} requires a value"
                 REQUESTED_TAG="$1"
                 ;;
             --prefix)
@@ -498,33 +714,31 @@ render_header() {
         printf "%b\n" "${C_DIM}man:${C_RESET}    ${MAN_DIR}"
     fi
     printf "%b\n" "${C_DIM}host:${C_RESET}   ${PLATFORM_LABEL}"
+    printf "%b\n" "${C_DIM}releases:${C_RESET} $(releases_page_url)"
     line
 }
 
-binary_url() {
-    local libc=""
-    libc="$(detect_libc)"
-    local asset_name="${SECONDARY_NAME}-${OS}-${ARCH}"
-    if [ "$OS" = "linux" ]; then
-        asset_name="${SECONDARY_NAME}-linux-${libc}-${ARCH}"
-    fi
-    if [ "$USE_LATEST_REDIRECT" -eq 1 ]; then
-        printf "%s\n" "https://github.com/${REPO}/releases/latest/download/${asset_name}"
-    else
-        printf "%s\n" "https://github.com/${REPO}/releases/download/${VERSION}/${asset_name}"
-    fi
-}
-
 download_binary() {
-    local url=""
-    url="$(binary_url)"
+    local url="" tried=0
+    SELECTED_ASSET_URL=""
+    SELECTED_ASSET_SHA256=""
     step "downloading ${SECONDARY_NAME} for ${OS}/${ARCH}"
-    if ! download_file "$url" "$TMP_BIN"; then
-        die "failed to download release asset for ${PLATFORM_LABEL}. expected asset: ${SECONDARY_NAME}-${OS}-${ARCH}"
+    while IFS= read -r url; do
+        [ -n "$url" ] || continue
+        tried=1
+        if download_file "$url" "$TMP_BIN" 2>/dev/null && [ -s "$TMP_BIN" ]; then
+            SELECTED_ASSET_URL="$url"
+            SELECTED_ASSET_SHA256="$(lookup_asset_sha256 "$url")"
+            chmod 755 "$TMP_BIN"
+            okay "binary downloaded"
+            return 0
+        fi
+    done <<< "$(list_binary_download_urls_ordered)"
+
+    if [ "$tried" -eq 0 ]; then
+        die "no candidate download URLs were generated for ${PLATFORM_LABEL}. See $(releases_page_url)"
     fi
-    [ -s "$TMP_BIN" ] || die "downloaded binary is empty"
-    chmod 755 "$TMP_BIN"
-    okay "binary downloaded"
+    die "failed to download a matching release asset for ${PLATFORM_LABEL}. See $(releases_page_url)"
 }
 
 download_manpage() {
@@ -752,14 +966,12 @@ main() {
         note "using local install prefix ${PREFIX}"
     fi
 
-    if [ "$USE_LATEST_REDIRECT" -eq 1 ]; then
-        note "installing latest release via redirect"
+    if [ -n "$RELEASE_JSON" ]; then
+        note "installing ${VERSION} (see $(releases_page_url))"
+    elif [ "$USE_LATEST_REDIRECT" -eq 1 ]; then
+        note "installing latest release via redirect (see $(releases_page_url))"
     else
-        note "installing release ${VERSION}"
-    fi
-
-    if [ "$OS" = "linux" ] && [ "$DISTRO_ID" = "linuxmint" ]; then
-        note "Linux Mint detected precisely (why? funni)"
+        note "installing ${VERSION} using constructed asset URLs (see $(releases_page_url))"
     fi
 
     download_binary
@@ -771,4 +983,6 @@ main() {
     show_summary
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi
