@@ -242,6 +242,15 @@ For some BSDs or Linux Distributions:
 curl -fsSL https://raw.githubusercontent.com/RobertFlexx/fastfind/main/install.sh | sh
 ```
 
+### Or if youre on an Arch distro
+
+```bash
+paru -S fastfind-bin
+```
+```bash
+yay -S fastfind-bin
+```
+
 ### Update
 
 Update to the latest version:
