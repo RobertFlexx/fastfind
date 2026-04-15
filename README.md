@@ -585,6 +585,12 @@ System specs:
 - **ff built-in content search** - simpler than fd+grep pipeline (but slower)
 - **find** - surprisingly competitive for simple patterns
 
+---
+
+> *Fun fact, ff uses less cpu in ALMOST the speed of fd!*
+
+---
+
 | Operation | Recommendation |
 |-----------|----------------|
 | Simple glob (`*.txt`) | `fd --glob` or `find -name` |
