@@ -1,7 +1,7 @@
 # src/ff/nlp.nim
 ## natural language query parser
 ## converts human readable queries to filter parameters
-import std/[strutils, times, options, sequtils, re]
+import std/[strutils, times, options, sequtils]
 import core, units, matchers
 
 type

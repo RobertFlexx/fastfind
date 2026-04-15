@@ -78,7 +78,6 @@ proc hasAnyWildcard(s: string): bool {.inline.} =
 proc extractGlobExtension*(glob: string): string =
   if glob.len == 0: return ""
   if glob[0] == '*' and glob.len > 1:
-    let extStart = 1
     if glob[1] == '.':
       var extEnd = 2
       while extEnd < glob.len and glob[extEnd] notin {'*', '?', '['}:
