@@ -228,7 +228,7 @@ proc isGitIgnored*(path: string): bool =
   if root.len == 0:
     return false
   let relPath = relativePath(path, root)
-  let (output, success) = runGitCommand(root, ["check-ignore", "-q", relPath])
+  let (_, success) = runGitCommand(root, ["check-ignore", "-q", relPath])
   success
 
 proc getGitBranch*(root: string): string =

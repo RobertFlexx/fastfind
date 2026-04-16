@@ -1,4 +1,7 @@
 # src/ff/search.nim
+
+# Notice: large swaths of commented-in code are here!
+# I noticed they were unused, but didn't know if they were important or will be used in the future
 import std/[os, strutils, options, re, times]
 import core, cli, matchers, content, fuzzy_match
 
@@ -6,7 +9,7 @@ when defined(posix):
   import std/posix
 
 when compileOption("threads"):
-  import std/[locks, atomics, threadpool, cpuinfo]
+  # import std/[locks, atomics, threadpool, cpuinfo]
   import parallel
 
 type
@@ -63,8 +66,8 @@ proc isHiddenPath(relPath: string): bool {.inline.} =
       if relPath[i + 1] == '.': return true
   false
 
-proc isHiddenName(name: string): bool {.inline.} =
-  name.len > 0 and name[0] == '.'
+# proc isHiddenName(name: string): bool {.inline.} =
+#   name.len > 0 and name[0] == '.'
 
 proc containsUpper(s: string): bool {.inline.} =
   for ch in s:
@@ -515,17 +518,17 @@ when defined(posix):
       relPath: string
       depth: int
 
-  proc direntKind(d: ptr Dirent; parentAbs, name: string): EntryType =
-    when declared(DT_DIR):
-      if d.d_type == DT_DIR: return etDir
-      if d.d_type == DT_REG: return etFile
-      if d.d_type == DT_LNK: return etLink
-    let fullPath = parentAbs / name
-    var st: Stat
-    if lstat(fullPath.cstring, st) == 0:
-      if S_ISDIR(st.st_mode): return etDir
-      if S_ISLNK(st.st_mode): return etLink
-    etFile
+  # proc direntKind(d: ptr Dirent; parentAbs, name: string): EntryType =
+  #   when declared(DT_DIR):
+  #     if d.d_type == DT_DIR: return etDir
+  #     if d.d_type == DT_REG: return etFile
+  #     if d.d_type == DT_LNK: return etLink
+  #   let fullPath = parentAbs / name
+  #   var st: Stat
+  #   if lstat(fullPath.cstring, st) == 0:
+  #     if S_ISDIR(st.st_mode): return etDir
+  #     if S_ISLNK(st.st_mode): return etLink
+  #   etFile
 
   proc runSearchStreamPathsSimplePosix(cfg: Config; rootAbs: string;
                                        kind: SimplePatternKind; coreCmp: string;
@@ -822,186 +825,186 @@ when compileOption("threads"):
       if added == 0 and args.results.isLimitReached():
         args.queue.signalShutdown()
 
-  proc workerFastPathProc(args: WorkerArgs) {.thread, gcsafe.} =
-    let ctx = args.ctx
-    var localMatches = newSeqOfCap[MatchResult](256)
-    var pathBuf = newStringOfCap(512)
+#   proc workerFastPathProc(args: WorkerArgs) {.thread, gcsafe.} =
+#     let ctx = args.ctx
+#     var localMatches = newSeqOfCap[MatchResult](256)
+#     var pathBuf = newStringOfCap(512)
+#
+#     while true:
+#       if args.queue.isShutdown() or args.results.isLimitReached():
+#         break
+#
+#       var batch = args.queue.tryPopBatch(2048)
+#
+#       if batch.len == 0:
+#         if args.queue.isComplete():
+#           break
+#         os.sleep(1)
+#         continue
+#
+#       for entry in batch:
+#         args.stats.incVisitedDirs()
+#         args.stats.incVisited()
+#
+#         let dirp = opendir(entry.path.cstring)
+#         if dirp.isNil:
+#           args.stats.incErrors()
+#           continue
+#         defer: discard closedir(dirp)
+#
+#         let currentPath = entry.path
+#         let currentRelPath = entry.relPath
+#         let currentRelEmpty = currentRelPath.len == 0
+#         var currentPathSlash = ""
+#         if currentPath.len > 0 and currentPath[^1] != '/':
+#           currentPathSlash = currentPath & '/'
+#         else:
+#           currentPathSlash = currentPath
+#
+#         var childDirs = newSeqOfCap[DirEntry](128)
+#
+#         while true:
+#           if args.results.isLimitReached():
+#             break
+#           let dent = readdir(dirp)
+#           if dent.isNil: break
+#           let name = $cast[cstring](addr dent.d_name[0])
+#           if name == "." or name == "..":
+#             continue
+#           if not ctx.includeHidden and name.len > 0 and name[0] == '.':
+#             args.stats.incSkipped()
+#             continue
+#
+#           if not matchSimpleBase(name, ctx.spKind, ctx.spCore, ctx.cachedIC):
+#             args.stats.incVisited()
+#             when declared(DT_DIR):
+#               if dent.d_type == DT_DIR:
+#                 args.stats.incVisitedDirs()
+#                 if currentRelEmpty:
+#                   childDirs.add(DirEntry(path: currentPathSlash & name, relPath: name, depth: entry.depth + 1))
+#                 else:
+#                   pathBuf.setLen(0)
+#                   pathBuf.add(currentRelPath)
+#                   pathBuf.add('/')
+#                   pathBuf.add(name)
+#                   childDirs.add(DirEntry(path: currentPathSlash & name, relPath: pathBuf, depth: entry.depth + 1))
+#             continue
+#
+#           args.stats.incMatched()
+#           let kindVal = when declared(DT_DIR):
+#             if dent.d_type == DT_DIR: etDir
+#             elif dent.d_type == DT_REG: etFile
+#             elif dent.d_type == DT_LNK: etLink
+#             else: etFile
+#           else:
+#             etFile
+#
+#           if kindVal == etDir:
+#             if currentRelEmpty:
+#               childDirs.add(DirEntry(path: currentPathSlash & name, relPath: name, depth: entry.depth + 1))
+#             else:
+#               pathBuf.setLen(0)
+#               pathBuf.add(currentRelPath)
+#               pathBuf.add('/')
+#               pathBuf.add(name)
+#               childDirs.add(DirEntry(path: currentPathSlash & name, relPath: pathBuf, depth: entry.depth + 1))
+#
+#           if kindVal in ctx.cfg.types:
+#             let outPath = if ctx.cfg.absolute:
+#               currentPathSlash & name
+#             elif currentRelEmpty:
+#               name
+#             else:
+#               pathBuf.setLen(0)
+#               pathBuf.add(currentRelPath)
+#               pathBuf.add('/')
+#               pathBuf.add(name)
+#               pathBuf
+#             localMatches.add(MatchResult(
+#               path: outPath,
+#               relPath: outPath,
+#               absPath: currentPathSlash & name,
+#               name: if ctx.needResultName: name else: "",
+#               size: 0,
+#               mtime: times.fromUnix(0),
+#               kind: kindVal,
+#               fuzzyScore: -1
+#             ))
+#
+#         if childDirs.len > 0:
+#           args.queue.pushBatch(childDirs)
+#
+#         if localMatches.len >= 128:
+#           let added = args.results.addMatches(localMatches)
+#           localMatches.setLen(0)
+#           if added == 0 and args.results.isLimitReached():
+#             args.queue.signalShutdown()
+#             break
+#
+#     if localMatches.len > 0:
+#       discard args.results.addMatches(localMatches)
 
-    while true:
-      if args.queue.isShutdown() or args.results.isLimitReached():
-        break
-
-      var batch = args.queue.tryPopBatch(2048)
-      
-      if batch.len == 0:
-        if args.queue.isComplete():
-          break
-        os.sleep(1)
-        continue
-
-      for entry in batch:
-        args.stats.incVisitedDirs()
-        args.stats.incVisited()
-
-        let dirp = opendir(entry.path.cstring)
-        if dirp.isNil:
-          args.stats.incErrors()
-          continue
-        defer: discard closedir(dirp)
-
-        let currentPath = entry.path
-        let currentRelPath = entry.relPath
-        let currentRelEmpty = currentRelPath.len == 0
-        var currentPathSlash = ""
-        if currentPath.len > 0 and currentPath[^1] != '/':
-          currentPathSlash = currentPath & '/'
-        else:
-          currentPathSlash = currentPath
-
-        var childDirs = newSeqOfCap[DirEntry](128)
-
-        while true:
-          if args.results.isLimitReached():
-            break
-          let dent = readdir(dirp)
-          if dent.isNil: break
-          let name = $cast[cstring](addr dent.d_name[0])
-          if name == "." or name == "..":
-            continue
-          if not ctx.includeHidden and name.len > 0 and name[0] == '.':
-            args.stats.incSkipped()
-            continue
-
-          if not matchSimpleBase(name, ctx.spKind, ctx.spCore, ctx.cachedIC):
-            args.stats.incVisited()
-            when declared(DT_DIR):
-              if dent.d_type == DT_DIR:
-                args.stats.incVisitedDirs()
-                if currentRelEmpty:
-                  childDirs.add(DirEntry(path: currentPathSlash & name, relPath: name, depth: entry.depth + 1))
-                else:
-                  pathBuf.setLen(0)
-                  pathBuf.add(currentRelPath)
-                  pathBuf.add('/')
-                  pathBuf.add(name)
-                  childDirs.add(DirEntry(path: currentPathSlash & name, relPath: pathBuf, depth: entry.depth + 1))
-            continue
-
-          args.stats.incMatched()
-          let kindVal = when declared(DT_DIR):
-            if dent.d_type == DT_DIR: etDir
-            elif dent.d_type == DT_REG: etFile
-            elif dent.d_type == DT_LNK: etLink
-            else: etFile
-          else:
-            etFile
-
-          if kindVal == etDir:
-            if currentRelEmpty:
-              childDirs.add(DirEntry(path: currentPathSlash & name, relPath: name, depth: entry.depth + 1))
-            else:
-              pathBuf.setLen(0)
-              pathBuf.add(currentRelPath)
-              pathBuf.add('/')
-              pathBuf.add(name)
-              childDirs.add(DirEntry(path: currentPathSlash & name, relPath: pathBuf, depth: entry.depth + 1))
-
-          if kindVal in ctx.cfg.types:
-            let outPath = if ctx.cfg.absolute:
-              currentPathSlash & name
-            elif currentRelEmpty:
-              name
-            else:
-              pathBuf.setLen(0)
-              pathBuf.add(currentRelPath)
-              pathBuf.add('/')
-              pathBuf.add(name)
-              pathBuf
-            localMatches.add(MatchResult(
-              path: outPath,
-              relPath: outPath,
-              absPath: currentPathSlash & name,
-              name: if ctx.needResultName: name else: "",
-              size: 0,
-              mtime: times.fromUnix(0),
-              kind: kindVal,
-              fuzzyScore: -1
-            ))
-
-        if childDirs.len > 0:
-          args.queue.pushBatch(childDirs)
-
-        if localMatches.len >= 128:
-          let added = args.results.addMatches(localMatches)
-          localMatches.setLen(0)
-          if added == 0 and args.results.isLimitReached():
-            args.queue.signalShutdown()
-            break
-
-    if localMatches.len > 0:
-      discard args.results.addMatches(localMatches)
-
-  proc runParallelSearchFastPath(cfg: Config; rootAbs: string;
-                                  spKind: SimplePatternKind; spCore: string;
-                                  cachedIC: bool; globalStart: times.Time): SearchResult =
-    result.stats.startTime = globalStart
-    let numWorkers = effectiveThreadCount(cfg)
-
-    var ctx = WorkerContext(
-      rootAbs: rootAbs,
-      cfg: cfg,
-      matcher: Matcher(),
-      ex: Excluder(),
-      giLines: @[],
-      useGi: false,
-      rootDev: -1,
-      contentRx: none(Regex),
-      cachedIC: cachedIC,
-      needInfo: false,
-      includeHidden: cfg.includeHidden,
-      needResultName: needsResultName(cfg),
-      matchAll: spKind == spkUniversal,
-      hasExcludes: false,
-      oneFileSystem: false,
-      spKind: spKind,
-      spCore: spCore
-    )
-
-    let queue = newWorkQueue()
-    let results = newResultCollector(cfg.limit)
-    let stats = newAtomicStats()
-
-    queue.push(DirEntry(path: rootAbs, relPath: "", depth: 0))
-
-    if numWorkers == 1:
-      var args = WorkerArgs(
-        ctx: addr ctx,
-        queue: queue,
-        results: results,
-        stats: stats,
-        workerId: 0
-      )
-      workerFastPathProc(args)
-    else:
-      var threads = newSeq[Thread[WorkerArgs]](numWorkers)
-      for i in 0..<numWorkers:
-        var args = WorkerArgs(
-          ctx: addr ctx,
-          queue: queue,
-          results: results,
-          stats: stats,
-          workerId: i
-        )
-        createThread(threads[i], workerFastPathProc, args)
-      for i in 0..<numWorkers:
-        joinThread(threads[i])
-
-    result.matches = results.getMatches()
-    result.stats = stats.toStats(globalStart, times.getTime())
-
-    queue.destroy()
-    results.destroy()
-    stats.destroy()
+  # proc runParallelSearchFastPath(cfg: Config; rootAbs: string;
+  #                                 spKind: SimplePatternKind; spCore: string;
+  #                                 cachedIC: bool; globalStart: times.Time): SearchResult =
+  #   result.stats.startTime = globalStart
+  #   let numWorkers = effectiveThreadCount(cfg)
+  #
+  #   var ctx = WorkerContext(
+  #     rootAbs: rootAbs,
+  #     cfg: cfg,
+  #     matcher: Matcher(),
+  #     ex: Excluder(),
+  #     giLines: @[],
+  #     useGi: false,
+  #     rootDev: -1,
+  #     contentRx: none(Regex),
+  #     cachedIC: cachedIC,
+  #     needInfo: false,
+  #     includeHidden: cfg.includeHidden,
+  #     needResultName: needsResultName(cfg),
+  #     matchAll: spKind == spkUniversal,
+  #     hasExcludes: false,
+  #     oneFileSystem: false,
+  #     spKind: spKind,
+  #     spCore: spCore
+  #   )
+  #
+  #   let queue = newWorkQueue()
+  #   let results = newResultCollector(cfg.limit)
+  #   let stats = newAtomicStats()
+  #
+  #   queue.push(DirEntry(path: rootAbs, relPath: "", depth: 0))
+  #
+  #   if numWorkers == 1:
+  #     var args = WorkerArgs(
+  #       ctx: addr ctx,
+  #       queue: queue,
+  #       results: results,
+  #       stats: stats,
+  #       workerId: 0
+  #     )
+  #     workerFastPathProc(args)
+  #   else:
+  #     var threads = newSeq[Thread[WorkerArgs]](numWorkers)
+  #     for i in 0..<numWorkers:
+  #       var args = WorkerArgs(
+  #         ctx: addr ctx,
+  #         queue: queue,
+  #         results: results,
+  #         stats: stats,
+  #         workerId: i
+  #       )
+  #       createThread(threads[i], workerFastPathProc, args)
+  #     for i in 0..<numWorkers:
+  #       joinThread(threads[i])
+  #
+  #   result.matches = results.getMatches()
+  #   result.stats = stats.toStats(globalStart, times.getTime())
+  #
+  #   queue.destroy()
+  #   results.destroy()
+  #   stats.destroy()
 
   proc runParallelSearch(cfg: Config; rootAbs: string; globalStart: times.Time): SearchResult =
     result.stats.startTime = globalStart
@@ -1019,7 +1022,7 @@ when compileOption("threads"):
 
     var spKind: SimplePatternKind
     var spCore = ""
-    let useFastPath = canUseSimplePathStream(cfg) and parseSimplePattern(cfg, spKind, spCore)
+    # let useFastPath = canUseSimplePathStream(cfg) and parseSimplePattern(cfg, spKind, spCore)
     let spCoreCmp = if cachedIC: spCore.toLowerAscii() else: spCore
 
     var ctx = WorkerContext(

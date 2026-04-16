@@ -1,6 +1,6 @@
 # src/ff/parallel.nim
 
-import std/[locks, atomics, options, strutils]
+import std/[locks, atomics, strutils]
 import std/times as times
 import core
 

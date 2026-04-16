@@ -1,8 +1,11 @@
 # src/ff/nlp.nim
 ## natural language query parser
 ## converts human readable queries to filter parameters
-import std/[strutils, times, options, sequtils, sets, tables]
+import std/[strutils, times, options, sequtils, sets]
 import core, units, matchers
+
+# PSA: any commented variables you see were unused, but I (kokonico) have no idea what they're original purpose was
+# hence, i'll keep them just in case
 
 type
   ParsedQuery* = object
@@ -35,12 +38,12 @@ const
     ("decade", 3650), ("centuries", 36500), ("century", 36500)
   ]
 
-  TimeUnitDays = toHashSet(@["day", "days", "d", "jornada", "dia", "giorni", "tag", "tages"])
-  TimeUnitHours = toHashSet(@["hour", "hours", "hr", "hrs", "h", "hrz", "hora", "heure", "stunde", "ore"])
-  TimeUnitWeeks = toHashSet(@["week", "weeks", "w", "wk", "wks", "semaine", "woche", "settimana"])
-  TimeUnitMonths = toHashSet(@["month", "months", "mo", "mos", "mese", "mois", "monat", "mesi"])
-  TimeUnitMins = toHashSet(@["minute", "minutes", "min", "mins", "m", "minuto", "minute", "minuten"])
-  TimeUnitSecs = toHashSet(@["second", "seconds", "sec", "secs", "s", "segundo"])
+  # TimeUnitDays = toHashSet(@["day", "days", "d", "jornada", "dia", "giorni", "tag", "tages"])
+  # TimeUnitHours = toHashSet(@["hour", "hours", "hr", "hrs", "h", "hrz", "hora", "heure", "stunde", "ore"])
+  # TimeUnitWeeks = toHashSet(@["week", "weeks", "w", "wk", "wks", "semaine", "woche", "settimana"])
+  # TimeUnitMonths = toHashSet(@["month", "months", "mo", "mos", "mese", "mois", "monat", "mesi"])
+  # TimeUnitMins = toHashSet(@["minute", "minutes", "min", "mins", "m", "minuto", "minute", "minuten"])
+  # TimeUnitSecs = toHashSet(@["second", "seconds", "sec", "secs", "s", "segundo"])
 
   TypeFile = toHashSet(@["file", "files", "document", "documents", "doc", "docs", "documento", "fichier", "datei", "archivio", "ficheiro"])
   TypeDir = toHashSet(@["directory", "directories", "folder", "folders", "dir", "dirs", "carpeta", "dossier", "ordner", "cartella", "directorio"])
@@ -83,7 +86,7 @@ const
   CategorySheets = @[".xls", ".xlsx", ".ods", ".numbers", ".csv", ".tsv"]
   CategorySlides = @[".ppt", ".pptx", ".odp", ".key", ".fodp", ".fodt", ".sxi"]
   CategoryDevops = @[".yaml", ".yml", ".json", ".toml", ".ini", ".conf", ".cfg", ".env", ".properties", ".tf", ".tfvars", ".bicep", ".dockerfile", ".dockerignore", ".gitignore", ".dockerignore"]
-  CategoryMedia = @[".jpg", ".jpeg", ".png", ".gif", ".bmp", ".svg", ".webp", ".mp4", ".avi", ".mkv", ".mov", ".mp3", ".wav", ".flac", ".ogg", ".m4a"]
+  # CategoryMedia = @[".jpg", ".jpeg", ".png", ".gif", ".bmp", ".svg", ".webp", ".mp4", ".avi", ".mkv", ".mov", ".mp3", ".wav", ".flac", ".ogg", ".m4a"]
   CategoryDatabase = @[".sql", ".db", ".sqlite", ".sqlite3", ".mdb", ".accdb", ".frm", ".ibd", ".dbf", ".nsf", ".dbi"]
   CategoryFonts = @[".ttf", ".otf", ".woff", ".woff2", ".eot", ".svg", ".pfb", ".pfm", ".afm", ".ttc", ".fnt", ".gsf"]
 
@@ -279,10 +282,10 @@ const
   SizeKeywords = toHashSet(@["size", "sized", "length", "long", "big", "huge", "large", "small", "tiny", "bytes", "kb", "mb", "gb", "tb"])
   TimeKeywords = toHashSet(@["modified", "changed", "updated", "created", "accessed", "birth", "mtime", "atime", "ctime", "timestamp", "date"])
   ContentKeywords = toHashSet(@["containing", "contains", "include", "includes", "with", "having", "has", "matching", "content", "text", "string"])
-  NameKeywords = toHashSet(@["named", "called", "name", "matching", "like", "filename", "file"])
+  # NameKeywords = toHashSet(@["named", "called", "name", "matching", "like", "filename", "file"])
   LocationKeywords = toHashSet(@["in", "inside", "under", "within", "from", "located", "locatedin", "path", "directory", "folder", "subdirectory"])
-  ExcludeKeywords = toHashSet(@["not", "exclude", "excluding", "without", "except", "ignore", "ignoring", "skip", "skipping", "avoid"])
-  ExtensionKeywords = toHashSet(@["extension", "ext", "type", "format", "kind"])
+  # ExcludeKeywords = toHashSet(@["not", "exclude", "excluding", "without", "except", "ignore", "ignoring", "skip", "skipping", "avoid"])
+  # ExtensionKeywords = toHashSet(@["extension", "ext", "type", "format", "kind"])
 
 proc isNaturalLanguageQuery*(query: string): bool =
   let q = query.strip()
@@ -382,7 +385,7 @@ proc parseNaturalQuery*(query: string): ParsedQuery =
   q.matchMode = mmGlob
 
   var textParts: seq[string] = @[]
-  var collectText = false
+  # var collectText = false
   var rawWords = query.toLowerAscii().split()
   var words: seq[string] = @[]
 

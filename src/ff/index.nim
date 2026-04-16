@@ -1,5 +1,5 @@
-import std/[os, times, strutils, json, locks, options, streams, tables, algorithm, hashes, sequtils, threadpool]
-import core, cli, fuzzy_match, search, matchers
+import std/[os, times, strutils, json, locks, options, streams, tables, hashes, sequtils]
+import core, cli, fuzzy_match, matchers
 
 const
   IndexFileName = ".fastfind_index.json"
@@ -199,7 +199,7 @@ proc updateIndexIncremental*(paths: seq[string]; cfg: Config; showProgress: bool
   var count = 0
   var lastProgress = 0
   var newEntries = 0
-  var modifiedEntries = 0
+  # var modifiedEntries = 0
 
   for rootPath in paths:
     let rootAbs = absolutePath(rootPath)

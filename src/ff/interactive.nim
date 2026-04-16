@@ -1,5 +1,5 @@
-import std/[os, terminal, times as times, strutils, algorithm, sequtils, re, osproc]
-import core, cli, search, ansi, fuzzy_match, matchers
+import std/[os, terminal, times as times, strutils, algorithm, re, osproc]
+import core, cli, search, fuzzy_match, matchers
 
 when defined(posix):
   import std/posix
@@ -128,8 +128,8 @@ proc clearScr() =
 proc clearLn() =
   stdout.write("\x1b[2K")
 
-proc clearToEOL() =
-  stdout.write("\x1b[K")
+# proc clearToEOL() =
+#   stdout.write("\x1b[K")
 
 proc initState(cfg: Config): TUIState =
   result.mode = modeBrowse

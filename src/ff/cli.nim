@@ -1,4 +1,4 @@
-import std/[os, strutils, parseopt, times, tables, options, cpuinfo]
+import std/[os, strutils, times, tables, options]
 import ansi, core, matchers, units, fuzzy, nlp
 
 proc spaces(n: int): string {.inline.} = repeat(' ', n)
@@ -78,20 +78,23 @@ type
 const
   Version* = "fastfind 2.2.0"
   
+  # note: these were in here and unused
+  # i have no idea what they do
+  # leaving them in comment form in case they're important!
   ShortOptsWithValue = {'j', 't', 'd', 'e', 's', 'n'}
-  ShortOptsNoValue = {'h', 'v', 'q', 'l', 'r', 'c', 'H', 'L', 'x', 'i', 'f'}
+  # ShortOptsNoValue = {'h', 'v', 'q', 'l', 'r', 'c', 'H', 'L', 'x', 'i', 'f'}
   
-  LongOptsNoValue = @[
-    "help", "version", "glob", "regex", "fixed", "fuzzy", "fuzzy-score",
-    "full-match", "name", "full-path", "ignore-case", "smart-case", "fd",
-    "hidden", "follow", "one-file-system", "gitignore", "no-gitignore",
-    "binary", "git-modified", "git-untracked", "git-tracked", "git-changed",
-    "rank", "rank-recency", "rank-depth", "long", "json", "ndjson", "table",
-    "absolute", "relative", "reverse", "count", "stats", "interactive",
-    "select", "use-index", "rebuild-index", "update-index", "verify-index",
-    "index-status", "index-daemon",
-    "shell", "verbose", "quiet-errors", "no-config", "recent"
-  ]
+  # LongOptsNoValue = @[
+  #   "help", "version", "glob", "regex", "fixed", "fuzzy", "fuzzy-score",
+  #   "full-match", "name", "full-path", "ignore-case", "smart-case", "fd",
+  #   "hidden", "follow", "one-file-system", "gitignore", "no-gitignore",
+  #   "binary", "git-modified", "git-untracked", "git-tracked", "git-changed",
+  #   "rank", "rank-recency", "rank-depth", "long", "json", "ndjson", "table",
+  #   "absolute", "relative", "reverse", "count", "stats", "interactive",
+  #   "select", "use-index", "rebuild-index", "update-index", "verify-index",
+  #   "index-status", "index-daemon",
+  #   "shell", "verbose", "quiet-errors", "no-config", "recent"
+  # ]
 
 proc applyParsedQuery*(cfg: var Config; pq: ParsedQuery)
 
@@ -383,10 +386,10 @@ proc helpText(useColor: bool): string =
   
   result.add(R("NOTE") & "\n")
   result.add("  " & D("Parallel mode (-j) adds threading overhead that") & "\n")
-  result.add("  " & D("hurts performance for simple recursive listing.")& "\n")
-  result.add("  " & D("Default (no -j) is fastest for filename search.")& "\n")
+  result.add("  " & D("hurts performance for simple recursive listing.") & "\n")
+  result.add("  " & D("Default (no -j) is fastest for filename search.") & "\n")
   result.add("  " & D("Use -j for CPU-intensive work: content search,") & "\n")
-  result.add("  " & D("complex regex, or heavy pattern matching.")& "\n")
+  result.add("  " & D("complex regex, or heavy pattern matching.") & "\n")
   result.add("\n")
   
   result.add(G("KEY") & "\n")
