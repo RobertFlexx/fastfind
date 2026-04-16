@@ -294,7 +294,7 @@ proc helpText(useColor: bool): string =
   template row(a, b: string): string = "  " & pad(a, col1w) & b & "\n"
   
   result = ""
-  result.add(B("fastfind ") & G("2.1.0") & " - fast file finder\n")
+  result.add(B("fastfind ") & G("2.2.0") & " - fast file finder\n")
   result.add(D("usage: ff [options] <pattern> [path] ...\n"))
   result.add("\n")
   
