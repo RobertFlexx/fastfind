@@ -5,7 +5,7 @@ proc spaces(n: int): string {.inline.} = repeat(' ', n)
 
 type
   IndexCommand* = enum
-    icNone, icRebuild, icStatus, icDaemon
+    icNone, icRebuild, icUpdate, icStatus, icVerify, icDaemon
 
   RankMode* = enum
     rmNone, rmScore, rmDepth, rmRecency, rmAuto
@@ -76,7 +76,7 @@ type
     fdMode*: bool
 
 const
-  Version* = "fastfind 2.1.0"
+  Version* = "fastfind 2.2.0"
   
   ShortOptsWithValue = {'j', 't', 'd', 'e', 's', 'n'}
   ShortOptsNoValue = {'h', 'v', 'q', 'l', 'r', 'c', 'H', 'L', 'x', 'i', 'f'}
@@ -88,7 +88,8 @@ const
     "binary", "git-modified", "git-untracked", "git-tracked", "git-changed",
     "rank", "rank-recency", "rank-depth", "long", "json", "ndjson", "table",
     "absolute", "relative", "reverse", "count", "stats", "interactive",
-    "select", "use-index", "rebuild-index", "index-status", "index-daemon",
+    "select", "use-index", "rebuild-index", "update-index", "verify-index",
+    "index-status", "index-daemon",
     "shell", "verbose", "quiet-errors", "no-config", "recent"
   ]
 
@@ -366,7 +367,10 @@ proc helpText(useColor: bool): string =
   
   result.add(C("INDEX") & "\n")
   result.add(row("--use-index", "Use cached index"))
-  result.add(row("--rebuild-index", "Rebuild index"))
+  result.add(row("--rebuild-index", "Full rebuild"))
+  result.add(row("--update-index", "Incremental update"))
+  result.add(row("--verify-index", "Check validity"))
+  result.add(row("--index-status", "Show status"))
   result.add("\n")
   
   result.add(B("EXAMPLES") & "\n")
@@ -374,6 +378,7 @@ proc helpText(useColor: bool): string =
   result.add("  " & H("ff") & " config -t d      " & D("# Directories") & "\n")
   result.add("  " & H("ff") & " todo --contains  " & D("# Contains todo") & "\n")
   result.add("  " & H("ff") & " \"large files\"    " & D("# Natural lang") & "\n")
+  result.add("  " & H("ff") & " --update-index .  " & D("# Update index") & "\n")
   result.add("\n")
   
   result.add(R("NOTE") & "\n")
@@ -580,6 +585,8 @@ proc parseCli*(args: seq[string]): Config =
         of "select": result.selectMode = true
         of "use-index": result.useIndex = true
         of "rebuild-index": result.indexCommand = icRebuild
+        of "update-index": result.indexCommand = icUpdate
+        of "verify-index": result.indexCommand = icVerify
         of "index-status": result.indexCommand = icStatus
         of "index-daemon": result.indexCommand = icDaemon
         of "shell": result.execShell = true

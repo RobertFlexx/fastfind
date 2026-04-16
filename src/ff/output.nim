@@ -71,7 +71,7 @@ proc emitStatsIfNeeded*(cfg: Config; stats: Stats) =
 proc execForMatches(cfg: Config; matches: seq[MatchResult]): int =
   result = 0
   for m in matches:
-    let path = outPath(cfg, m)
+    let path = m.absPath
     let cmd = cfg.execCmd.replace("{}", quoteShell(path))
     let code = execShellCmd(cmd)
     if code != 0:

@@ -557,9 +557,6 @@ when defined(posix):
       let currentAbsPath = entry.absPath
       let currentRelPath = entry.relPath
       let currentRelEmpty = currentRelPath.len == 0
-      var currentAbsSlashLen = currentAbsPath.len
-      if currentAbsPath.len > 0 and currentAbsPath[^1] != '/':
-        currentAbsSlashLen = currentAbsPath.len + 1
 
       while true:
         if hasLimit and emitted >= cfg.limit:

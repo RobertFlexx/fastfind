@@ -67,8 +67,9 @@ fastfind holds its own while offering features that go beyond fd:
 * Built-in content search (`--contains`)
   no grep pipeline needed
 
-* Natural language queries (BETA)
+* Natural language queries
   `"python files modified this week"`
+  `"code files larger than 100kb"`
 
 * Fuzzy matching
   no need for `fzf` in simple cases
@@ -77,10 +78,10 @@ fastfind holds its own while offering features that go beyond fd:
   `--function`, `--class`, `--symbol`
 
 * Interactive mode
-  built-in selection UI
+  built-in selection UI with `:exec` and `:rm` commands
 
 * Index-based search (optional)
-  faster repeated queries
+  fast incremental updates, lock-free reads
 
 * Single static binary
   minimal dependencies
@@ -186,9 +187,12 @@ fastfind is about doing more with one command, without giving up too much perfor
 
 ---
 
-***[Changelogs for 2.1.0](https://github.com/RobertFlexx/fastfind/blob/main/CHANGELOG.md)***
+***[Changelogs for 2.2.0](https://github.com/RobertFlexx/fastfind/blob/main/CHANGELOG.md)***
 
 ---
+
+# Natural Language Queries is now out of BETA!
+
 
 ## Below is more information on fastfind. Read below to learn how to install, use, and/or compile this software.
 
@@ -469,19 +473,62 @@ ff "python files containing TODO"
 ff --interactive
 ```
 
-## Natural language queries (BETA)
+## Natural language queries
 
-`fastfind` can interpret simple natural language queries and translate them into filters automatically.
+`fastfind` can interpret natural language queries and translate them into filters automatically.
 
-Examples:
-
+### Basic Usage
 ```bash
-ff "python files containing TODO"
-ff "large log files modified today"
-ff "config files bigger than 10MB"
+ff "python files"
+ff "rust code"
+ff "config files"
+ff "log files"
 ```
 
-⚠ This feature is currently experimental and may change in future releases.
+### Time-based Queries
+```bash
+ff "files modified this week"
+ff "files modified 2 days ago"
+ff "files modified in the last hour"
+ff "files older than 30 days"
+ff "recent files"
+```
+
+### Size-based Queries
+```bash
+ff "large files"
+ff "small files"
+ff "empty files"
+ff "files larger than 10mb"
+ff "files between 1mb and 10mb"
+```
+
+### Compound Expressions
+```bash
+ff "python code files modified this week"
+ff "rust files larger than 100kb"
+ff "config files modified today"
+ff "large log files modified yesterday"
+ff "image files modified this month"
+```
+
+### Language-specific Queries
+```bash
+ff "python files"
+ff "javascript files"
+ff "rust code"
+ff "go files"
+ff "shell scripts"
+ff "docker files"
+ff "terraform files"
+```
+
+### Content Search
+```bash
+ff "python files containing TODO"
+ff "config files containing password"
+ff "log files containing error"
+```
 
 > for more documentation, use `man ff` (or whatever alias you're using) in the terminal.
 
@@ -642,6 +689,49 @@ ff --symbol Config .
 
 This allows basic code discovery without launching a language server.
 
+## Index-based search
+
+fastfind supports optional index-based search for faster repeated queries:
+
+```bash
+# Build initial index
+ff --rebuild-index ~
+
+# Update index incrementally (fast)
+ff --update-index ~
+
+# Verify and clean stale entries
+ff --verify-index
+
+# Check index status
+ff --index-status
+
+# Use index for searches
+ff "*.py" --use-index
+```
+
+The index stores file metadata (path, size, mtime, kind) for quick lookups. Incremental updates only process changed files.
+
+## Interactive mode commands
+
+In interactive mode, use these commands:
+```bash
+:cd <path>     # Change directory
+:exec <cmd>   # Run command on selected files (use {} for path)
+:rm           # Delete selected files
+:sort <key>   # Sort by name/size/time
+:filter <f|d|l>  # Filter by type (file/dir/link)
+:h            # Toggle hidden files
+:q            # Quit
+```
+
+Example:
+```
+# Select files with Space, then:
+:exec rm {}      # Delete selected files
+:exec echo {}    # Echo selected paths
+```
+
 ## Use cases
 
 Use `ff` when:
@@ -675,7 +765,7 @@ ff "<natural language query>" [path ...]
 | Filters           | `--type`, `--size`, `--changed`, `--contains`, `--exclude`                |
 | Git               | `--git-modified`, `--git-untracked`, `--git-tracked`, `--git-changed`     |
 | Output            | `--long`, `--json`, `--ndjson`, `--table`, `--sort`, `--limit`, `--stats` |
-| Interactive/index | `--interactive`, `--select`, `--use-index`, `--rebuild-index`             |
+| Interactive/index | `--interactive`, `--select`, `--use-index`, `--rebuild-index`, `--update-index`, `--verify-index` |
 
 ### More examples
 
@@ -736,3 +826,8 @@ Please report vulnerabilities using [`SECURITY.md`](SECURITY.md).
 ## License
 
 MIT License. See [`LICENSE`](LICENSE).
+
+
+## Regards,
+
+As a solo developer, i love and hate developing. I love developing a lot especially for the open source community, and i enjoy making free software for EVERYONE to enjoy; 0 fee. But development gets hard especially on a medium scale project as 1 guy, and if updates dont happen often, or updates are buggy, i am very sorry. I take hours out of my day strictly programming on projects i love, and care about. Especially this one, i focus a lot of my time on this and im happy its getting attention. Programming has been a wild ride for me, and a very passionate one too, as i love doing the things i do for the open source community. And the cons. Developing a lot has taken a toll on my mental health, as i barely get sleep at night due to me constantly debugging stuff lol, but i will always try to push new updates on a lot of my software. Thank you for the support! > - RobertFlexx

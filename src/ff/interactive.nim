@@ -1,4 +1,4 @@
-import std/[os, terminal, times as times, strutils, algorithm, sequtils, re]
+import std/[os, terminal, times as times, strutils, algorithm, sequtils, re, osproc]
 import core, cli, search, ansi, fuzzy_match, matchers
 
 when defined(posix):
@@ -175,7 +175,7 @@ proc initState(cfg: Config): TUIState =
         let l = line.strip()
         if l.len > 0 and dirExists(l):
           result.bookmarks.add(l)
-    except:
+    except CatchableError:
       discard
 
 proc saveBookmarks(state: TUIState) =
@@ -187,7 +187,7 @@ proc saveBookmarks(state: TUIState) =
     defer: close(f)
     for b in state.bookmarks:
       f.writeLine(b)
-  except:
+  except CatchableError:
     discard
 
 proc setMessage(state: var TUIState; msg: string; msgType: string = "info") =
@@ -237,7 +237,7 @@ proc formatTime(t: times.Time): string =
       return t.format("MMM dd HH:mm")
     else:
       return t.format("yyyy-MM-dd ")
-  except:
+  except CatchableError:
     return "           "
 
 proc isExecutable(path: string): bool =
@@ -247,7 +247,7 @@ proc isExecutable(path: string): bool =
       return fpUserExec in info.permissions or
              fpGroupExec in info.permissions or
              fpOthersExec in info.permissions
-    except:
+    except CatchableError:
       return false
   else:
     return false
@@ -327,7 +327,7 @@ proc loadDirectory(state: var TUIState) =
         let info = getFileInfo(path)
         entry.size = info.size
         entry.mtime = info.lastWriteTime
-      except:
+      except CatchableError:
         entry.size = 0
         entry.mtime = times.fromUnix(0)
       
@@ -346,7 +346,7 @@ proc loadDirectory(state: var TUIState) =
         dirs.add(entry)
       else:
         files.add(entry)
-  except:
+  except CatchableError:
     state.setMessage("Cannot read directory: " & state.cwd, "error")
     return
   
@@ -411,7 +411,7 @@ proc applyFilter(state: var TUIState) =
       try:
         if nameLower.match(re(pattern)):
           scored.add((0, i))
-      except:
+      except CatchableError:
         if nameLower.contains(queryLower.replace("*", "").replace("?", "")):
           scored.add((50, i))
     else:
@@ -472,7 +472,7 @@ proc runGlobalSearch(state: var TUIState) =
       entry.mtime = m.mtime
       entry.selected = m.absPath in state.selectedPaths
       state.globalResults.add(entry)
-  except:
+  except CatchableError:
     discard
   
   state.globalSearching = false
@@ -710,7 +710,7 @@ proc drawPreview(state: TUIState) =
           inc fileCount
         if count > 500:
           break
-    except:
+    except CatchableError:
       discard
     
     gotoXY(px + 2, 6)
@@ -725,7 +725,7 @@ proc drawPreview(state: TUIState) =
       let target = expandSymlink(entry.path)
       gotoXY(px + 2, 6)
       stdout.write(ColorPreview & "-> " & truncateRight(target, pw - 7) & ColorReset)
-    except:
+    except CatchableError:
       discard
     return
   
@@ -807,7 +807,7 @@ proc drawStatusBar(state: TUIState) =
       if fpUserWrite in info.permissions: p.add("w") else: p.add("-")
       if fpUserExec in info.permissions: p.add("x") else: p.add("-")
       p
-    except:
+    except CatchableError:
       "---"
     right = perms & " │ " & formatSize(entry.size).strip() & " │ " & formatTime(entry.mtime).strip() & " "
   
@@ -918,6 +918,8 @@ proc drawHelp(state: TUIState; fd: cint) =
   stdout.write(ColorBold & "Commands (:)" & ColorReset & "\n")
   stdout.write("  :cd PATH    Change directory   :q          Quit\n")
   stdout.write("  :h          Toggle hidden      :sort NAME  Set sort\n")
+  stdout.write("  :exec CMD   Run cmd on files  :rm         Delete file(s)\n")
+  stdout.write("  (use {} in exec cmd for path, e.g. :exec rm {})\n")
   stdout.write("\n")
   
   stdout.write(ColorDim & "Press any key to continue..." & ColorReset)
@@ -1118,6 +1120,51 @@ proc executeCommand(state: var TUIState; cmd: string) =
     else:
       state.typeFilter = ""
       loadDirectory(state)
+  of "exec":
+    if parts.len > 1:
+      let cmd = parts[1]
+      let entry = currentEntry(state)
+      var targets: seq[string]
+      if state.selectedPaths.len > 0:
+        targets = state.selectedPaths
+      elif entry.name.len > 0 and entry.name != "..":
+        targets = @[entry.path]
+      else:
+        targets = @[]
+      if targets.len == 0:
+        state.setMessage("No file selected", "warning")
+        return
+      for path in targets:
+        let fullCmd = cmd.replace("{}", quoteShell(path))
+        let code = execShellCmd(fullCmd)
+        if code != 0:
+          state.setMessage("Command failed with exit code: " & $code, "error")
+          return
+      state.setMessage("Executed: " & cmd & " on " & $targets.len & " file(s)", "success")
+    else:
+      state.setMessage("Usage: exec <command> (use {} for path)", "warning")
+  of "rm", "delete":
+    if state.selectedPaths.len > 0:
+      for path in state.selectedPaths:
+        try:
+          removeFile(path)
+          state.selectedPaths.delete(state.selectedPaths.find(path))
+        except CatchableError:
+          state.setMessage("Failed to remove: " & path, "error")
+          return
+      state.setMessage("Removed " & $state.selectedPaths.len & " file(s)", "success")
+      loadDirectory(state)
+    else:
+      let entry = currentEntry(state)
+      if entry.name.len > 0 and entry.name != ".." and entry.kind == etFile:
+        try:
+          removeFile(entry.path)
+          state.setMessage("Removed: " & entry.name, "success")
+          loadDirectory(state)
+        except CatchableError:
+          state.setMessage("Failed to remove: " & entry.name, "error")
+      else:
+        state.setMessage("No file selected", "warning")
   else:
     state.setMessage("Unknown command: " & parts[0], "error")
 
@@ -1481,7 +1528,7 @@ proc runInteractive*(cfg: Config) =
               let name = extractFilename(path)
               if kind == pcDir and name.toLowerAscii().startsWith(prefix):
                 matches.add(path)
-          except:
+          except CatchableError:
             discard
           
           if matches.len == 1:

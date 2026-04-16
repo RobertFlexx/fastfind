@@ -1,10 +1,11 @@
-import std/[os, times, strutils, json, locks, options, streams, tables, algorithm, hashes, sequtils]
+import std/[os, times, strutils, json, locks, options, streams, tables, algorithm, hashes, sequtils, threadpool]
 import core, cli, fuzzy_match, search, matchers
 
 const
   IndexFileName = ".fastfind_index.json"
-  IndexVersion = 2
+  IndexVersion = 3
   MaxIndexEntries = 5_000_000
+  DefaultIndexAgeHours = 24
 
 var indexLock: Lock
 initLock(indexLock)
@@ -121,15 +122,85 @@ proc saveIndex*(idx: FileIndex) =
 proc loadIndex*(): FileIndex =
   loadIndexStream(getIndexPath())
 
-proc updateIndex*(paths: seq[string]; cfg: Config; showProgress: bool = false) =
-  var idx = FileIndex(
-    version: IndexVersion,
-    updated: getTime().toUnix,
-    rootPaths: paths,
-    entries: newSeqOfCap[IndexEntry](100000)
-  )
+proc saveIndexSafe*(idx: FileIndex) =
+  acquire(indexLock)
+  try:
+    saveIndex(idx)
+  finally:
+    release(indexLock)
+
+proc loadIndexSafe*(): FileIndex =
+  acquire(indexLock)
+  try:
+    result = loadIndex()
+  finally:
+    release(indexLock)
+
+proc verifyIndexEntries*(idx: var FileIndex): int =
+  var valid = newSeqOfCap[IndexEntry](idx.entries.len)
+  var removed = 0
+  for entry in idx.entries:
+    if fileExists(entry.path) or dirExists(entry.path) or symlinkExists(entry.path):
+      valid.add(entry)
+    else:
+      inc removed
+  idx.entries = valid
+  removed
+
+proc updateIndexEntry(path: string): Option[IndexEntry] =
+  try:
+    let info = getFileInfo(path, followSymlink = false)
+    let name = extractFilename(path)
+    let kind: int8 = case info.kind
+      of pcFile: int8(ord(etFile))
+      of pcDir: int8(ord(etDir))
+      of pcLinkToFile, pcLinkToDir: int8(ord(etLink))
+    let depth = computeDepth(path)
+    result = some(IndexEntry(
+      path: path,
+      name: name,
+      size: info.size,
+      mtime: info.lastWriteTime.toUnix,
+      kind: kind,
+      depth: depth
+    ))
+  except CatchableError:
+    discard
+
+proc updateIndexIncremental*(paths: seq[string]; cfg: Config; showProgress: bool = false) =
+  var idx: FileIndex
+  var isNew = true
+  var staleRemoved = 0
+  var changedUpdated = 0
+  var unchangedCount = 0
+
+  if indexExists():
+    idx = loadIndex()
+    isNew = false
+    if showProgress:
+      stderr.writeLine("Loaded existing index with " & $idx.entries.len & " entries")
+    staleRemoved = verifyIndexEntries(idx)
+    if showProgress and staleRemoved > 0:
+      stderr.writeLine("Removed " & $staleRemoved & " stale entries")
+    idx.updated = getTime().toUnix
+
+  if isNew:
+    idx = FileIndex(
+      version: IndexVersion,
+      updated: getTime().toUnix,
+      rootPaths: paths,
+      entries: newSeqOfCap[IndexEntry](100000)
+    )
+
+  var existingPaths = initTable[string, int](idx.entries.len)
+  for i, e in idx.entries:
+    existingPaths[e.path] = i
+
   var count = 0
   var lastProgress = 0
+  var newEntries = 0
+  var modifiedEntries = 0
+
   for rootPath in paths:
     let rootAbs = absolutePath(rootPath)
     if not dirExists(rootAbs):
@@ -138,39 +209,76 @@ proc updateIndex*(paths: seq[string]; cfg: Config; showProgress: bool = false) =
       for path in walkDirRec(rootAbs, yieldFilter = {pcFile, pcDir, pcLinkToFile, pcLinkToDir}):
         if idx.entries.len >= MaxIndexEntries:
           break
-        try:
-          var info: FileInfo
-          try:
-            info = getFileInfo(path, followSymlink = false)
-          except CatchableError:
-            continue
-          let name = extractFilename(path)
-          let kind: int8 = case info.kind
-            of pcFile: int8(ord(etFile))
-            of pcDir: int8(ord(etDir))
-            of pcLinkToFile, pcLinkToDir: int8(ord(etLink))
-          let depth = computeDepth(path)
-          idx.entries.add(IndexEntry(
-            path: path,
-            name: name,
-            size: info.size,
-            mtime: info.lastWriteTime.toUnix,
-            kind: kind,
-            depth: depth
-          ))
-          inc count
-          if showProgress and count - lastProgress >= 10000:
-            stderr.write("\rIndexed: " & $count & " files...")
-            stderr.flushFile()
-            lastProgress = count
-        except CatchableError:
-          continue
+        if existingPaths.hasKey(path):
+          let existingIdx = existingPaths[path]
+          let existing = idx.entries[existingIdx]
+          var newEntry = updateIndexEntry(path)
+          if newEntry.isSome:
+            let ne = newEntry.get
+            if ne.mtime != existing.mtime or ne.size != existing.size:
+              idx.entries[existingIdx] = ne
+              inc changedUpdated
+            else:
+              inc unchangedCount
+          existingPaths.del(path)
+        else:
+          var newEntry = updateIndexEntry(path)
+          if newEntry.isSome:
+            idx.entries.add(newEntry.get)
+            inc newEntries
+        inc count
+        if showProgress and count - lastProgress >= 10000:
+          let status = if isNew: "Indexed" else: "Updated"
+          stderr.write("\r" & status & ": " & $count & " files (" & $newEntries & " new, " & $changedUpdated & " modified)...")
+          stderr.flushFile()
+          lastProgress = count
     except CatchableError:
       continue
+
   if showProgress:
-    stderr.writeLine("\rIndexed: " & $count & " files.    ")
-  withLock(indexLock):
-    saveIndex(idx)
+    let status = if isNew: "Indexed" else: "Updated"
+    stderr.writeLine("\r" & status & ": " & $count & " files (" & $newEntries & " new, " & $changedUpdated & " modified, " & $unchangedCount & " unchanged).    ")
+
+  if not isNew:
+    idx.rootPaths = paths
+
+  saveIndexSafe(idx)
+  if showProgress and staleRemoved > 0:
+    stderr.writeLine("Total entries: " & $idx.entries.len)
+
+proc updateIndex*(paths: seq[string]; cfg: Config; showProgress: bool = false; forceFullRebuild: bool = false) =
+  if forceFullRebuild or not indexExists():
+    var idx = FileIndex(
+      version: IndexVersion,
+      updated: getTime().toUnix,
+      rootPaths: paths,
+      entries: newSeqOfCap[IndexEntry](100000)
+    )
+    var count = 0
+    var lastProgress = 0
+    for rootPath in paths:
+      let rootAbs = absolutePath(rootPath)
+      if not dirExists(rootAbs):
+        continue
+      try:
+        for path in walkDirRec(rootAbs, yieldFilter = {pcFile, pcDir, pcLinkToFile, pcLinkToDir}):
+          if idx.entries.len >= MaxIndexEntries:
+            break
+          var entryOpt = updateIndexEntry(path)
+          if entryOpt.isSome:
+            idx.entries.add(entryOpt.get)
+            inc count
+            if showProgress and count - lastProgress >= 10000:
+              stderr.write("\rIndexed: " & $count & " files...")
+              stderr.flushFile()
+              lastProgress = count
+      except CatchableError:
+        continue
+    if showProgress:
+      stderr.writeLine("\rIndexed: " & $count & " files.    ")
+    saveIndexSafe(idx)
+  else:
+    updateIndexIncremental(paths, cfg, showProgress)
 
 proc matchesPattern(name: string; pattern: string; ignoreCase: bool; matchMode: MatchMode): bool =
   let n = if ignoreCase: name.toLowerAscii() else: name
@@ -213,9 +321,10 @@ proc searchIndex*(cfg: Config): SearchResult =
   if not indexExists():
     result.stats.endTime = getTime()
     return
-  var idx: FileIndex
-  withLock(indexLock):
-    idx = loadIndex()
+  var idx = loadIndex()
+  if idx.version < IndexVersion:
+    result.stats.endTime = getTime()
+    return
   let ignoreCase = cfg.ignoreCase or (cfg.smartCase and cfg.patterns.allIt(it == it.toLowerAscii()))
   let hasPatterns = cfg.patterns.len > 0
   let checkSize = cfg.minSize >= 0 or cfg.maxSize >= 0
@@ -294,9 +403,10 @@ proc searchIndexFast*(cfg: Config): SearchResult =
   if not indexExists():
     result.stats.endTime = getTime()
     return
-  var idx: FileIndex
-  withLock(indexLock):
-    idx = loadIndex()
+  var idx = loadIndex()
+  if idx.version < IndexVersion:
+    result.stats.endTime = getTime()
+    return
   if idx.entries.len == 0:
     result.stats.endTime = getTime()
     return
@@ -361,17 +471,6 @@ proc searchIndexFast*(cfg: Config): SearchResult =
   result.stats.matched = matchCount
   result.stats.endTime = getTime()
 
-proc verifyIndexEntries*(idx: var FileIndex): int =
-  var valid = newSeqOfCap[IndexEntry](idx.entries.len)
-  var removed = 0
-  for entry in idx.entries:
-    if fileExists(entry.path) or dirExists(entry.path) or symlinkExists(entry.path):
-      valid.add(entry)
-    else:
-      inc removed
-  idx.entries = valid
-  removed
-
 proc getIndexStats*(): tuple[count: int, lastUpdate: Time, sizeBytes: int64, rootPaths: seq[string]] =
   if not indexExists():
     return (0, fromUnix(0), 0'i64, @[])
@@ -391,7 +490,7 @@ proc getIndexAge*(): Duration =
   let idx = loadIndex()
   getTime() - fromUnix(idx.updated)
 
-proc isIndexStale*(maxAge: Duration = initDuration(hours = 24)): bool =
+proc isIndexStale*(maxAge: Duration = initDuration(hours = DefaultIndexAgeHours)): bool =
   getIndexAge() > maxAge
 
 proc handleIndexCommand*(cfg: Config) =
@@ -399,10 +498,18 @@ proc handleIndexCommand*(cfg: Config) =
   of icRebuild:
     let startTime = getTime()
     stderr.writeLine("Building index...")
-    updateIndex(cfg.paths, cfg, showProgress = true)
+    updateIndex(cfg.paths, cfg, showProgress = true, forceFullRebuild = true)
     let stats = getIndexStats()
     let elapsed = (getTime() - startTime).inMilliseconds
     stdout.writeLine("Index built: " & $stats.count & " entries in " & $elapsed & "ms")
+    stdout.writeLine("Saved to: " & getIndexPath())
+  of icUpdate:
+    let startTime = getTime()
+    stderr.writeLine("Updating index (incremental)...")
+    updateIndex(cfg.paths, cfg, showProgress = true, forceFullRebuild = false)
+    let stats = getIndexStats()
+    let elapsed = (getTime() - startTime).inMilliseconds
+    stdout.writeLine("Index updated: " & $stats.count & " entries in " & $elapsed & "ms")
     stdout.writeLine("Saved to: " & getIndexPath())
   of icStatus:
     if indexExists():
@@ -419,15 +526,27 @@ proc handleIndexCommand*(cfg: Config) =
         for rp in stats.rootPaths:
           stdout.writeLine("    - " & rp)
       if isIndexStale():
-        stdout.writeLine("  Status: STALE (consider rebuilding)")
+        stdout.writeLine("  Status: STALE (consider rebuilding with --rebuild-index)")
       else:
         stdout.writeLine("  Status: OK")
     else:
       stdout.writeLine("No index found")
       stdout.writeLine("Create one with: ff --rebuild-index <path>")
+      stdout.writeLine("Or use incremental update: ff --update-index <path>")
+  of icVerify:
+    var idx = loadIndex()
+    let before = idx.entries.len
+    let removed = verifyIndexEntries(idx)
+    let after = idx.entries.len
+    if removed > 0:
+      saveIndexSafe(idx)
+      stdout.writeLine("Verified index: removed " & $removed & " stale entries")
+      stdout.writeLine("Entries: " & $before & " -> " & $after)
+    else:
+      stdout.writeLine("Index verified: all " & $idx.entries.len & " entries valid")
   of icDaemon:
     stderr.writeLine("Daemon mode not yet implemented.")
-    stderr.writeLine("Use cron or systemd timer to run: ff --rebuild-index <path>")
+    stderr.writeLine("Use cron or systemd timer to run: ff --update-index <path>")
     quit(1)
   of icNone:
     discard
