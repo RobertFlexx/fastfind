@@ -112,13 +112,25 @@ try:
 except Exception:
     raise SystemExit(0)
 
+found = False
+
 for asset in release.get("assets") or []:
     if asset.get("browser_download_url") != want:
         continue
+
+    found = True
     digest = asset.get("digest") or ""
+
     if isinstance(digest, str) and digest.startswith("sha256:"):
         print(digest.split(":", 1)[1])
-    raise SystemExit(0)
+        raise SystemExit(0)
+
+# asset exists but no sha
+if found:
+    raise SystemExit(1)
+
+# asset not found
+raise SystemExit(0)
 PY
 }
 fi
