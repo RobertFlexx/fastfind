@@ -66,22 +66,28 @@ proc pickIndex(ms: seq[MatchResult]): int =
 proc applyPlaceholders(s: string; path: string): string =
   s.replace("{}", path)
 
+proc applyShellPlaceholders(s: string; path: string): string =
+  s.replace("{}", quoteShell(path))
+
 proc runExec(cfg: Config; m: MatchResult): int =
   if cfg.execCmd.len == 0: return 0
   let p = outPath(cfg, m)
 
   if cfg.execShell:
-    var parts: seq[string] = @[applyPlaceholders(cfg.execCmd, p)]
+    var parts: seq[string] = @[applyShellPlaceholders(cfg.execCmd, p)]
     for a in cfg.execArgs:
-      parts.add(applyPlaceholders(a, p))
+      parts.add(applyShellPlaceholders(a, p))
     let line = parts.join(" ")
     return execCmd(line)
   else:
     var args: seq[string] = @[]
-    for a in cfg.execArgs:
-      args.add(applyPlaceholders(a, p))
+    if cfg.execArgs.len == 0:
+      args.add(p)
+    else:
+      for a in cfg.execArgs:
+        args.add(applyPlaceholders(a, p))
     try:
-      let pr = startProcess(cfg.execCmd, args = args, options = {poUsePath})
+      let pr = startProcess(cfg.execCmd, args = args, options = {poUsePath, poParentStreams})
       let code = pr.waitForExit()
       pr.close()
       return code
@@ -164,6 +170,12 @@ proc runSemanticSearch(cfg: Config): seq[MatchResult] =
       m.kind = etFile
       result.add(m)
 
+proc canUseIndexSearch(cfg: Config): bool =
+  cfg.useIndex and indexExists() and
+  cfg.containsText.len == 0 and cfg.containsRegex.len == 0 and
+  cfg.excludes.len == 0 and cfg.pathMode == pmBaseName and
+  cfg.matchMode != mmRegex
+
 when isMainModule:
   let cfg = parseCli(commandLineParams())
   let autoThreads = if cfg.threads > 0: cfg.threads else: 1
@@ -182,6 +194,11 @@ when isMainModule:
   if cfg.searchFunction.len > 0 or cfg.searchClass.len > 0 or cfg.searchSymbol.len > 0:
     var matches = runSemanticSearch(cfg)
     
+    if cfg.countOnly:
+      stdout.writeLine($matches.len)
+      emitStatsIfNeeded(cfg, Stats())
+      quit(0)
+
     if matches.len == 0:
       let searchTerm = if cfg.searchFunction.len > 0: cfg.searchFunction
                        elif cfg.searchClass.len > 0: cfg.searchClass
@@ -211,20 +228,28 @@ when isMainModule:
 
   if needsCollect:
     var res: SearchResult
+    var searchCfg = cfg
+    if cfg.sortKey != skNone or cfg.fuzzyMode or cfg.rankMode != rmNone:
+      searchCfg.limit = 0
     
     # ttry index first if enabled
-    if cfg.useIndex and indexExists():
-      res = searchIndex(cfg)
+    if canUseIndexSearch(searchCfg):
+      res = searchIndex(searchCfg)
       if res.matches.len == 0 and not cfg.indexOnly:
-        res = runSearchCollect(cfg)
+        res = runSearchCollect(searchCfg)
     else:
-      res = runSearchCollect(cfg)
+      res = runSearchCollect(searchCfg)
     
     var matches = res.matches
 
     # apply git filters
     if cfg.gitModified or cfg.gitUntracked or cfg.gitTracked or cfg.gitChanged:
       applyGitFilters(cfg, matches)
+
+    if cfg.countOnly:
+      stdout.writeLine($matches.len)
+      emitStatsIfNeeded(cfg, res.stats)
+      quit(0)
 
     if matches.len == 0:
       if cfg.naturalQuery.len > 0:
@@ -260,19 +285,31 @@ when isMainModule:
       if cfg.outputMode == omPlain:
         runSearchStreamPaths(cfg,
           proc(p: string) =
-            inc matched
-            outputBuf.add(p)
-            outputBuf.add('\n')
-            if outputBuf.len > 262140:
-              stdout.write(outputBuf)
-              outputBuf.setLen(0)
+            if cfg.countOnly:
+              discard
+            else:
+              inc matched
+              outputBuf.add(p)
+              outputBuf.add('\n')
+              if outputBuf.len > 262140:
+                stdout.write(outputBuf)
+                outputBuf.setLen(0)
         )
       else:
         runSearchStream(cfg,
           proc(m: MatchResult) =
-            inc matched
-            emitOne(cfg, m)
+            if cfg.countOnly:
+              discard
+            else:
+              inc matched
+              emitOne(cfg, m)
         )
+
+    if cfg.countOnly:
+      matched = stats.matched
+      stdout.writeLine($matched)
+      emitStatsIfNeeded(cfg, stats)
+      quit(0)
 
     if outputBuf.len > 0:
       stdout.write(outputBuf)

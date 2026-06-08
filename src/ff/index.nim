@@ -57,15 +57,13 @@ proc saveIndexStream(idx: FileIndex; path: string) =
   fs.write("\"rootPaths\": [")
   for i, rp in idx.rootPaths:
     if i > 0: fs.write(",")
-    fs.write("\"" & rp.replace("\\", "\\\\").replace("\"", "\\\"") & "\"")
+    fs.write($(%rp))
   fs.writeLine("],")
   fs.writeLine("\"entries\": [")
   for i, e in idx.entries:
     if i > 0: fs.writeLine(",")
-    let escapedPath = e.path.replace("\\", "\\\\").replace("\"", "\\\"")
-    let escapedName = e.name.replace("\\", "\\\\").replace("\"", "\\\"")
-    fs.write("{\"p\":\"" & escapedPath & "\",")
-    fs.write("\"n\":\"" & escapedName & "\",")
+    fs.write("{\"p\":" & $(%e.path) & ",")
+    fs.write("\"n\":" & $(%e.name) & ",")
     fs.write("\"s\":" & $e.size & ",")
     fs.write("\"m\":" & $e.mtime & ",")
     fs.write("\"k\":" & $e.kind & ",")
@@ -330,6 +328,10 @@ proc searchIndex*(cfg: Config): SearchResult =
   let checkSize = cfg.minSize >= 0 or cfg.maxSize >= 0
   let checkTime = cfg.newerThan.isSome or cfg.olderThan.isSome
   let checkDepth = cfg.minDepth > 0 or cfg.maxDepth >= 0
+  var roots: seq[tuple[root: string, prefix: string]] = @[]
+  for p in cfg.paths:
+    let root = absolutePath(p)
+    roots.add((root: root, prefix: if root.endsWith(DirSep): root else: root & DirSep))
   var lowercasePatterns: seq[string] = @[]
   if hasPatterns and ignoreCase:
     for p in cfg.patterns:
@@ -338,6 +340,14 @@ proc searchIndex*(cfg: Config): SearchResult =
     lowercasePatterns = cfg.patterns
   for entry in idx.entries:
     inc result.stats.visited
+    var inRequestedRoot = roots.len == 0
+    for r in roots:
+      if entry.path == r.root or entry.path.startsWith(r.prefix):
+        inRequestedRoot = true
+        break
+    if not inRequestedRoot:
+      inc result.stats.skipped
+      continue
     let kind = EntryType(entry.kind)
     if kind notin cfg.types:
       inc result.stats.skipped

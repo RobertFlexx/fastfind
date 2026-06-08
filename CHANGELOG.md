@@ -1,4 +1,47 @@
-# Changelog - fastfind v2.2.0
+# Changelog - fastfind v2.2.1
+
+## v2.2.1 - Patch Update
+
+This patch release focuses on correctness, security hardening, regression coverage, and small performance wins for count-only tree walking.
+
+### Security Fixes
+
+- Fixed shell placeholder quoting in select-mode `--exec` so paths containing shell metacharacters are passed safely.
+- Fixed non-shell exec handling so selected paths are passed as arguments without shell interpretation.
+- Hardened index serialization by using proper JSON string escaping for indexed paths and names, including control characters and newlines.
+
+### Bug Fixes
+
+- Fixed `--count`, which was parsed but previously still printed matching paths.
+- Fixed fuzzy `--limit` ordering so limits are applied after fuzzy/ranked sorting instead of before ranking.
+- Fixed `--exec-cmd` / `--exec-arg` handling in multi-result mode.
+- Fixed child process output inheritance for non-shell exec commands.
+- Fixed invalid `--regex` and `--contains-re` inputs to produce clean CLI errors instead of crashes or misleading no-match results.
+- Fixed index command positional paths so `ff --rebuild-index <path>` and `ff --update-index <path>` operate on the requested path.
+- Fixed `--use-index` path scoping so index results are limited to the requested search roots.
+- Fixed `--use-index` fallback behavior for unsupported searches such as content filters, excludes, regex mode, and full-path matching.
+- Fixed `-L` / `--follow` traversal into symlinked directories.
+
+### Performance Improvements
+
+- Improved fuzzy scoring quality while keeping full fuzzy-scan performance effectively unchanged in local benchmarks.
+- Removed redundant fuzzy/ranked result sorting work.
+- Avoid path output construction for count-only traversal.
+- Use traversal stats for count-only streaming output to reduce callback overhead.
+- Precompute indexed root prefixes before filtering index entries.
+
+### Tests
+
+- Added `nimble test` for CLI regression coverage.
+- Added regression tests for count output, exec arguments, shell quoting, regex errors, symlink traversal, index path scoping, index JSON escaping, and index fallback behavior.
+- Added fuzzy ranking regression coverage for exact/prefix and compact matches.
+
+### Benchmark Notes
+
+- Large-tree listing performance is effectively unchanged.
+- Count-only scans improved by roughly 11% on a local ~25k-entry benchmark fixture.
+
+---
 
 ## v2.2.0 - Feature Update
 

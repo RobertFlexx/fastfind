@@ -1,4 +1,4 @@
-import std/[os, strutils, times, tables, options]
+import std/[os, strutils, times, tables, options, re]
 import ansi, core, matchers, units, fuzzy, nlp
 
 proc spaces(n: int): string {.inline.} = repeat(' ', n)
@@ -76,7 +76,7 @@ type
     fdMode*: bool
 
 const
-  Version* = "fastfind 2.2.0"
+  Version* = "fastfind 2.2.1"
   
   # note: these were in here and unused
   # i have no idea what they do
@@ -297,7 +297,7 @@ proc helpText(useColor: bool): string =
   template row(a, b: string): string = "  " & pad(a, col1w) & b & "\n"
   
   result = ""
-  result.add(B("fastfind ") & G("2.2.0") & " - fast file finder\n")
+  result.add(B("fastfind ") & G("2.2.1") & " - fast file finder\n")
   result.add(D("usage: ff [options] <pattern> [path] ...\n"))
   result.add("\n")
   
@@ -470,6 +470,12 @@ proc parseColorMode(val: string): ColorMode =
   else:
     raise newException(ValueError, "unknown color mode: " & val)
 
+proc validateRegexValue(val, label: string) =
+  try:
+    discard re(val)
+  except CatchableError as e:
+    raise newException(ValueError, "invalid " & label & ": " & e.msg)
+
 proc getOptValue(args: seq[string]; idx: var int; currentVal: string): string =
   if currentVal.len > 0:
     return currentVal
@@ -633,6 +639,7 @@ proc parseCli*(args: seq[string]): Config =
           result.containsText = val
         of "contains-re":
           val = getOptValue(processedArgs, i, val)
+          validateRegexValue(val, "content regex")
           result.containsRegex = val
         of "max-bytes":
           val = getOptValue(processedArgs, i, val)
@@ -744,7 +751,9 @@ proc parseCli*(args: seq[string]): Config =
     stdout.writeLine(Version)
     quit(0)
   
-  if positionals.len > 0:
+  if positionals.len > 0 and result.indexCommand != icNone:
+    result.paths = positionals
+  elif positionals.len > 0:
     let first = positionals[0]
     if isNaturalLanguageQuery(first):
       result.naturalQuery = first
@@ -783,6 +792,18 @@ proc parseCli*(args: seq[string]): Config =
   
   applyAutoMode(result)
   applyAutoPathMode(result)
+  
+  if result.matchMode == mmRegex:
+    for p in result.patterns:
+      try:
+        var rxStr = p
+        if result.fullMatch:
+          if not rxStr.startsWith("^"): rxStr = "^" & rxStr
+          if not rxStr.endsWith("$"): rxStr = rxStr & "$"
+        validateRegexValue(rxStr, "filename regex")
+      except ValueError as e:
+        niceError(e.msg)
+        quit(2)
   
   if result.fuzzyMode and result.rankMode == rmNone:
     result.rankMode = rmScore

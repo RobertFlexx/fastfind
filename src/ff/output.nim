@@ -72,12 +72,29 @@ proc execForMatches(cfg: Config; matches: seq[MatchResult]): int =
   result = 0
   for m in matches:
     let path = m.absPath
-    let cmd = cfg.execCmd.replace("{}", quoteShell(path))
-    let code = execShellCmd(cmd)
+    var code = 0
+    if cfg.execShell:
+      var parts: seq[string] = @[cfg.execCmd.replace("{}", quoteShell(path))]
+      for a in cfg.execArgs:
+        parts.add(a.replace("{}", quoteShell(path)))
+      code = execShellCmd(parts.join(" "))
+    else:
+      var args: seq[string] = @[]
+      if cfg.execArgs.len == 0:
+        args.add(path)
+      else:
+        for a in cfg.execArgs:
+          args.add(a.replace("{}", path))
+      try:
+        let pr = startProcess(cfg.execCmd, args = args, options = {poUsePath, poParentStreams})
+        code = pr.waitForExit()
+        pr.close()
+      except CatchableError:
+        code = 127
     if code != 0:
       result = code
       if cfg.verbose:
-        stderr.writeLine "fastfind: exit " & $code & ": " & cmd
+        stderr.writeLine "fastfind: exit " & $code & ": " & cfg.execCmd
 
 proc fmtCodeMatch(cfg: Config; m: MatchResult; colored: bool): string =
   let t = codeSearchType(cfg)
@@ -145,6 +162,11 @@ proc emitTable(cfg: Config; matches: seq[MatchResult]) =
     stdout.writeLine line
 
 proc emitResults*(cfg: Config; matches: seq[MatchResult]; stats: Stats) =
+  if cfg.countOnly:
+    stdout.writeLine($matches.len)
+    emitStatsIfNeeded(cfg, stats)
+    return
+
   if cfg.execCmd.len > 0:
     discard execForMatches(cfg, matches)
     emitStatsIfNeeded(cfg, stats)

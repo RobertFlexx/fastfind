@@ -1,5 +1,5 @@
 # src/ff/ranking.nim
-import std/[times, algorithm]
+import std/times
 import core, cli
 
 
@@ -45,7 +45,3 @@ proc rankMatches*(matches: var seq[MatchResult]; cfg: Config) =
   
   for i in 0 ..< matches.len:
     matches[i].fuzzyScore = computeRankScore(matches[i], cfg)
-  
-  matches.sort(proc(a, b: MatchResult): int =
-    cmp(a.fuzzyScore, b.fuzzyScore)
-  )

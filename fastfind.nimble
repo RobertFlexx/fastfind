@@ -1,6 +1,6 @@
 # fastfind.nimble - Nim utility: fast file finder
 
-version       = "2.2.0"
+version       = "2.2.1"
 author        = "RobertFlexx"
 description   = "fastfind: a fast, feature-rich file finder with fuzzy search, interactive terminal UI, and git awareness."
 license       = "MIT"
@@ -31,6 +31,10 @@ task release_full, "Build fully optimized threaded release binary":
 
 task check, "Compile check":
   exec "nim c src/ff.nim"
+
+task test, "Run CLI regression tests":
+  exec "nim c -d:release --opt:speed -o:/tmp/opencode/fastfind-under-test src/ff.nim"
+  exec "bash tests/cli_regression.sh /tmp/opencode/fastfind-under-test"
 
 task clean, "Remove build artifacts":
   exec "rm -rf bin/fastfind nimcache"

@@ -182,6 +182,9 @@ proc shouldTraverseDirFast(cfg: Config; relPath: string; depth: int;
     if dev >= 0 and dev != rootDev: return false
   true
 
+proc shouldFollowLinkDir(cfg: Config; fullPath: string): bool {.inline.} =
+  cfg.followSymlinks and dirExists(fullPath)
+
 proc needsFileInfo(cfg: Config): bool {.inline.} =
   cfg.minSize >= 0 or cfg.maxSize >= 0 or
   cfg.newerThan.isSome or cfg.olderThan.isSome or
@@ -601,7 +604,7 @@ when defined(posix):
         else:
           direntKind(dent, currentAbsPath, name)
 
-        if kindVal == etDir:
+        if kindVal == etDir or (kindVal == etLink and shouldFollowLinkDir(cfg, currentAbsPath / name)):
           let childDepth = entry.depth + 1
           if currentRelEmpty:
             stack.add(PosixStackEntry(absPath: currentAbsPath & "/" & name, relPath: name, depth: childDepth))
@@ -613,7 +616,9 @@ when defined(posix):
             stack.add(PosixStackEntry(absPath: currentAbsPath & "/" & name, relPath: pathBuf, depth: childDepth))
 
         if defaultTypes or (kindVal in cfg.types):
-          if wantAbsolute:
+          if cfg.countOnly:
+            onPath("")
+          elif wantAbsolute:
             absBuf.setLen(0)
             absBuf.add(currentAbsPath)
             if currentAbsPath.len > 0 and currentAbsPath[^1] != '/':
@@ -787,7 +792,8 @@ when compileOption("threads"):
             computeRelPathInPlace(fullPath, ctx.rootAbs, relBuf)
             let relPath = relBuf.toString()
 
-            if kind == etDir and shouldTraverseDirFast(ctx.cfg, relPath, childDepth,
+            if (kind == etDir or (kind == etLink and shouldFollowLinkDir(ctx.cfg, fullPath))) and
+                shouldTraverseDirFast(ctx.cfg, relPath, childDepth,
                                    ctx.ex, gi, ctx.useGi,
                                    ctx.rootDev, fullPath, ctx.includeHidden,
                                    ctx.hasExcludes, ctx.oneFileSystem):
@@ -1116,7 +1122,8 @@ proc scanTreeCollect(rootAbs, startDir: string; cfg: Config;
 
         let rel = relPathFor(p)
 
-        if kind == etDir and shouldTraverseDir(cfg, rel, childDepth, ex, gi, useGi, rootDev, p, includeHidden):
+        if (kind == etDir or (kind == etLink and shouldFollowLinkDir(cfg, p))) and
+            shouldTraverseDir(cfg, rel, childDepth, ex, gi, useGi, rootDev, p, includeHidden):
           stack.add(StackEntry(path: p, depth: childDepth))
 
         let om = scanEntry(rootAbs, cfg, matcher, ex, gi, useGi, rootDev,
@@ -1245,7 +1252,8 @@ proc runSearchStream*(cfg: Config; onMatch: proc(m: MatchResult)): Stats =
 
           let rel = relPathFor(fp)
 
-          if kind == etDir and shouldTraverseDir(cfg, rel, childDepth, ex, gi, giInfo.useGi, rootDev, fp, includeHidden):
+          if (kind == etDir or (kind == etLink and shouldFollowLinkDir(cfg, fp))) and
+              shouldTraverseDir(cfg, rel, childDepth, ex, gi, giInfo.useGi, rootDev, fp, includeHidden):
             stack.add(StackEntry(path: fp, depth: childDepth))
 
           let om = scanEntry(rootAbs, cfg, matcher, ex, gi, giInfo.useGi, rootDev,
@@ -1340,8 +1348,11 @@ proc runSearchStreamPaths*(cfg: Config; onPath: proc(p: string)): Stats =
               if includeHidden or not isHiddenBase(fp):
                 if matchSimpleBase(fp, spKind, spCoreCmp, cachedIC):
                   inc result.matched
-                  let rel = relPathFor(fp)
-                  onPath(outputPathFor(cfg, rel, fp))
+                  if cfg.countOnly:
+                    onPath("")
+                  else:
+                    let rel = relPathFor(fp)
+                    onPath(outputPathFor(cfg, rel, fp))
                   inc emitted
                   if hasLimit and emitted >= cfg.limit:
                     stopAt = true
@@ -1349,14 +1360,18 @@ proc runSearchStreamPaths*(cfg: Config; onPath: proc(p: string)): Stats =
           else:
             let rel = relPathFor(fp)
 
-            if kind == etDir and shouldTraverseDir(cfg, rel, childDepth, ex, gi, giInfo.useGi, rootDev, fp, includeHidden):
+            if (kind == etDir or (kind == etLink and shouldFollowLinkDir(cfg, fp))) and
+                shouldTraverseDir(cfg, rel, childDepth, ex, gi, giInfo.useGi, rootDev, fp, includeHidden):
               stack.add(StackEntry(path: fp, depth: childDepth))
 
             if scanEntryPathOnly(cfg, matcher, ex, gi, giInfo.useGi, rootDev,
                                  fp, rel, kind, childDepth, contentRx, cachedIC,
                                  needInfo, includeHidden, result):
               inc result.matched
-              onPath(outputPathFor(cfg, rel, fp))
+              if cfg.countOnly:
+                onPath("")
+              else:
+                onPath(outputPathFor(cfg, rel, fp))
               inc emitted
               if hasLimit and emitted >= cfg.limit:
                 stopAt = true

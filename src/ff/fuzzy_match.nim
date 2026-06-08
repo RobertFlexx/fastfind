@@ -1,61 +1,69 @@
-## Optimized fuzzy matching - lower scores are better
+## Fuzzy matching - lower scores are better.
+
+import std/strutils
+
+proc isSep(c: char): bool {.inline.} =
+  c == '/' or c == '\\' or c == '_' or c == '-' or c == ' ' or c == '.'
+
+proc charBonus(text: string; idx: int): int {.inline.} =
+  if idx == 0:
+    return -18
+  let prev = text[idx - 1]
+  if isSep(prev):
+    return -16
+  if text[idx] in {'A'..'Z'} and prev in {'a'..'z'}:
+    return -12
+  0
 
 proc fuzzyMatch*(pattern: string; text: string): int =
   if pattern.len == 0: return 0
   if text.len == 0: return -1
   if pattern.len > text.len: return -1
-  
+
   let patLen = pattern.len
   let textLen = text.len
-  
-  if patLen <= 5:
-    for pc in pattern:
-      var found = false
-      for tc in text:
-        if tc == pc:
-          found = true
-          break
-      if not found: return -1
-  
-  var patIdx = 0
-  var textIdx = 0
-  var score = 0
-  var lastMatchIdx = -1
-  
-  while textIdx < textLen:
-    if textLen - textIdx < patLen - patIdx:
-      return -1
-    
-    if text[textIdx] == pattern[patIdx]:
-      if lastMatchIdx >= 0:
-        let gap = textIdx - lastMatchIdx - 1
+  var bestScore = high(int) div 8
+  var start = 0
+  while start < textLen:
+    if text[start] != pattern[0]:
+      inc start
+      continue
+
+    var patIdx = 1
+    var textIdx = start + 1
+    var lastMatch = start
+    var score = start * 2 + charBonus(text, start)
+
+    while patIdx < patLen and textIdx < textLen:
+      if text[textIdx] == pattern[patIdx]:
+        let gap = textIdx - lastMatch - 1
         if gap == 0:
-          score -= 2
+          score -= 10
         else:
-          score += gap
-      
-      if textIdx == 0:
-        score -= 5
-      else:
-        let prev = text[textIdx - 1]
-        if prev == '/' or prev == '_' or prev == '-' or prev == ' ' or prev == '.':
-          score -= 5
-        elif textIdx < textLen and text[textIdx] in {'A'..'Z'} and prev in {'a'..'z'}:
-          score -= 3
-      
-      lastMatchIdx = textIdx
-      inc patIdx
-      if patIdx >= patLen: break
-    
-    inc textIdx
-  
-  if patIdx < patLen: return -1
-  
-  for ch in text:
-    if ch == '/': score += 3
-  score += text.len shr 2
-  
-  if score < 1: 1 else: score
+          score += gap * 3
+        score += charBonus(text, textIdx)
+        lastMatch = textIdx
+        inc patIdx
+      inc textIdx
+
+    if patIdx == patLen:
+      score += (textLen - patLen)
+      for ch in text:
+        if ch == '/' or ch == '\\': score += 4
+
+      if textLen == patLen:
+        score -= 24
+      elif text.startsWith(pattern):
+        score -= 14
+
+      if score < bestScore:
+        bestScore = score
+
+    inc start
+
+  if bestScore == high(int) div 8: return -1
+
+  bestScore + 100
 
 proc fuzzyMatchMulti*(patterns: seq[string]; text: string): tuple[matched: bool, score: int] =
   result.matched = false
