@@ -1,4 +1,28 @@
-# Changelog - fastfind v2.2.1
+# Changelog - fastfind v2.2.2
+
+## v2.2.2 - Performance and Correctness Update
+
+This patch release improves large-tree traversal speed and tightens POSIX file-type behavior while preserving existing search features.
+
+### Bug Fixes
+
+- Fixed POSIX `-t f` / `--type f` filtering so regular files are not confused with sockets, pipes, or other special filesystem entries.
+- Fixed fast-path match accounting so type-filtered counts only include entries that pass the requested type filter.
+
+### Performance Improvements
+
+- Kept the low-allocation POSIX `readdir` fast path active for simple `-t f` and `-t d` searches.
+- Added POSIX fast-path support for `-x` / `--one-file-system`, checking device IDs only for traversed directories.
+- Avoided building unused matchers, excluders, and content regex state for simple path-streaming searches.
+- Removed per-match callback overhead from count-only streaming paths.
+
+### Benchmark Notes
+
+- On a local `/usr` tree, `ff "*" /usr -H -t f` ran about 1.38x faster than `find /usr -type f` while using less user CPU than `fd`.
+- On a local one-filesystem root scan, `ff "*" / -H -x -t f` ran about 1.17x faster than `find / -xdev -type f` after the fast-path update.
+- `fd` remains faster on highly parallel broad scans, while fastfind prioritizes low allocation, lower user CPU, and feature coverage.
+
+---
 
 ## v2.2.1 - Patch Update
 

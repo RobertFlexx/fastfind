@@ -187,7 +187,7 @@ fastfind is about doing more with one command, without giving up too much perfor
 
 ---
 
-***[Changelogs for 2.2.1](https://github.com/RobertFlexx/fastfind/blob/main/CHANGELOG.md)***
+***[Changelogs for 2.2.2](https://github.com/RobertFlexx/fastfind/blob/main/CHANGELOG.md)***
 
 ---
 

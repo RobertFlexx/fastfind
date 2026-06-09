@@ -114,6 +114,18 @@ proc getDeviceId(path: string): int64 {.inline.} =
       return int64(st.st_dev)
   -1
 
+proc isRegularFile(path: string): bool {.inline.} =
+  when defined(posix):
+    var st: Stat
+    if posix.lstat(path.cstring, st) == 0:
+      return S_ISREG(st.st_mode)
+    false
+  else:
+    true
+
+proc needsRegularFileCheck(cfg: Config; kind: EntryType): bool {.inline.} =
+  kind == etFile and etFile in cfg.types and cfg.types != {etFile, etDir, etLink}
+
 proc passesSize(cfg: Config; size: int64): bool {.inline.} =
   if cfg.minSize >= 0 and size < cfg.minSize: return false
   if cfg.maxSize >= 0 and size > cfg.maxSize: return false
@@ -209,6 +221,10 @@ proc scanEntry(rootAbs: string; cfg: Config; matcher: Matcher;
                needResultName: bool;
                stats: var Stats): Option[MatchResult] =
   if kind notin cfg.types:
+    inc stats.skipped
+    return none(MatchResult)
+
+  if needsRegularFileCheck(cfg, kind) and not isRegularFile(fullPath):
     inc stats.skipped
     return none(MatchResult)
 
@@ -313,6 +329,10 @@ proc scanEntryPathOnly(cfg: Config; matcher: Matcher;
                       needInfo: bool; includeHidden: bool;
                       stats: var Stats): bool =
   if kind notin cfg.types:
+    inc stats.skipped
+    return false
+
+  if needsRegularFileCheck(cfg, kind) and not isRegularFile(fullPath):
     inc stats.skipped
     return false
 
@@ -506,13 +526,11 @@ proc canUseSimplePathStream(cfg: Config): bool {.inline.} =
   (not cfg.fuzzyMode) and
   (not cfg.followSymlinks) and
   cfg.excludes.len == 0 and
-  (not cfg.oneFileSystem) and
   cfg.minDepth == 0 and
   cfg.maxDepth < 0 and
   cfg.minSize < 0 and cfg.maxSize < 0 and
   cfg.newerThan.isNone and cfg.olderThan.isNone and
-  cfg.containsText.len == 0 and cfg.containsRegex.len == 0 and
-  cfg.types == {etFile, etDir, etLink}
+  cfg.containsText.len == 0 and cfg.containsRegex.len == 0
 
 when defined(posix):
   type
@@ -521,17 +539,24 @@ when defined(posix):
       relPath: string
       depth: int
 
-  # proc direntKind(d: ptr Dirent; parentAbs, name: string): EntryType =
-  #   when declared(DT_DIR):
-  #     if d.d_type == DT_DIR: return etDir
-  #     if d.d_type == DT_REG: return etFile
-  #     if d.d_type == DT_LNK: return etLink
-  #   let fullPath = parentAbs / name
-  #   var st: Stat
-  #   if lstat(fullPath.cstring, st) == 0:
-  #     if S_ISDIR(st.st_mode): return etDir
-  #     if S_ISLNK(st.st_mode): return etLink
-  #   etFile
+  proc direntKind(d: ptr Dirent; parentAbs, name: string): EntryType =
+    when declared(DT_DIR):
+      if d.d_type == DT_DIR: return etDir
+      if d.d_type == DT_REG: return etFile
+      if d.d_type == DT_LNK: return etLink
+    let fullPath = parentAbs & "/" & name
+    var st: Stat
+    if lstat(fullPath.cstring, st) == 0:
+      if S_ISDIR(st.st_mode): return etDir
+      if S_ISLNK(st.st_mode): return etLink
+    etFile
+
+  proc direntIsRegular(d: ptr Dirent; parentAbs, name: string): bool =
+    when declared(DT_REG):
+      if d.d_type == DT_REG: return true
+      when declared(DT_UNKNOWN):
+        if d.d_type != DT_UNKNOWN: return false
+    isRegularFile(parentAbs & "/" & name)
 
   proc runSearchStreamPathsSimplePosix(cfg: Config; rootAbs: string;
                                        kind: SimplePatternKind; coreCmp: string;
@@ -546,6 +571,14 @@ when defined(posix):
     let wantAbsolute = cfg.absolute
     let wantHidden = cfg.includeHidden
     let defaultTypes = cfg.types == {etFile, etDir, etLink}
+    let oneFileSystem = cfg.oneFileSystem
+    let rootDev = if oneFileSystem: getDeviceId(rootAbs) else: -1
+
+    proc sameFileSystemDir(fullPath: string): bool =
+      if oneFileSystem and rootDev >= 0:
+        let dev = getDeviceId(fullPath)
+        return dev >= 0 and dev == rootDev
+      true
     
     while stack.len > 0:
       if hasLimit and emitted >= cfg.limit:
@@ -581,43 +614,60 @@ when defined(posix):
           when declared(DT_DIR):
             if dent.d_type == DT_DIR:
               inc result.visitedDirs
+              absBuf.setLen(0)
+              absBuf.add(currentAbsPath)
+              if currentAbsPath.len > 0 and currentAbsPath[^1] != '/':
+                absBuf.add('/')
+              absBuf.add(name)
+              if not sameFileSystemDir(absBuf):
+                continue
               if currentRelEmpty:
-                stack.add(PosixStackEntry(absPath: currentAbsPath & "/" & name, relPath: name, depth: entry.depth + 1))
+                stack.add(PosixStackEntry(absPath: absBuf, relPath: name, depth: entry.depth + 1))
               else:
                 pathBuf.setLen(0)
                 pathBuf.add(currentRelPath)
                 pathBuf.add('/')
                 pathBuf.add(name)
-                stack.add(PosixStackEntry(absPath: currentAbsPath & "/" & name, relPath: pathBuf, depth: entry.depth + 1))
+                stack.add(PosixStackEntry(absPath: absBuf, relPath: pathBuf, depth: entry.depth + 1))
             elif dent.d_type == DT_REG:
               inc result.visitedFiles
             elif dent.d_type == DT_LNK:
               inc result.visitedLinks
           continue
 
-        inc result.matched
         let kindVal = when declared(DT_DIR):
           if dent.d_type == DT_DIR: etDir
           elif dent.d_type == DT_REG: etFile
           elif dent.d_type == DT_LNK: etLink
-          else: etFile
+          else: direntKind(dent, currentAbsPath, name)
         else:
           direntKind(dent, currentAbsPath, name)
 
         if kindVal == etDir or (kindVal == etLink and shouldFollowLinkDir(cfg, currentAbsPath / name)):
           let childDepth = entry.depth + 1
+          absBuf.setLen(0)
+          absBuf.add(currentAbsPath)
+          if currentAbsPath.len > 0 and currentAbsPath[^1] != '/':
+            absBuf.add('/')
+          absBuf.add(name)
+          if not sameFileSystemDir(absBuf):
+            continue
           if currentRelEmpty:
-            stack.add(PosixStackEntry(absPath: currentAbsPath & "/" & name, relPath: name, depth: childDepth))
+            stack.add(PosixStackEntry(absPath: absBuf, relPath: name, depth: childDepth))
           else:
             pathBuf.setLen(0)
             pathBuf.add(currentRelPath)
             pathBuf.add('/')
             pathBuf.add(name)
-            stack.add(PosixStackEntry(absPath: currentAbsPath & "/" & name, relPath: pathBuf, depth: childDepth))
+            stack.add(PosixStackEntry(absPath: absBuf, relPath: pathBuf, depth: childDepth))
 
         if defaultTypes or (kindVal in cfg.types):
+          if needsRegularFileCheck(cfg, kindVal) and not direntIsRegular(dent, currentAbsPath, name):
+            inc result.skipped
+            continue
+          inc result.matched
           if cfg.countOnly:
-            onPath("")
+            discard
           elif wantAbsolute:
             absBuf.setLen(0)
             absBuf.add(currentAbsPath)
@@ -647,6 +697,10 @@ when compileOption("threads"):
                        hasExcludes: bool;
                        stats: AtomicStats): Option[MatchResult] =
     if kind notin cfg.types:
+      stats.incSkipped()
+      return none(MatchResult)
+
+    if needsRegularFileCheck(cfg, kind) and not isRegularFile(fullPath):
       stats.incSkipped()
       return none(MatchResult)
 
@@ -1276,10 +1330,6 @@ proc runSearchStreamPaths*(cfg: Config; onPath: proc(p: string)): Stats =
   result.startTime = times.getTime()
 
   let cachedIC = effectiveIgnoreCase(cfg)
-  let matcher = buildMatcher(cfg)
-  let ex = buildExcluder(cfg)
-  let contentRx = compileContentRegex(cfg, cachedIC)
-  let needInfo = needsFileInfo(cfg)
   let includeHidden = cfg.includeHidden
   let hasLimit = cfg.limit > 0
   var emitted = 0
@@ -1287,6 +1337,11 @@ proc runSearchStreamPaths*(cfg: Config; onPath: proc(p: string)): Stats =
   var spCore = ""
   let simplePathMode = canUseSimplePathStream(cfg) and parseSimplePattern(cfg, spKind, spCore)
   let spCoreCmp = if cachedIC: spCore.toLowerAscii() else: spCore
+
+  let matcher = if simplePathMode: Matcher() else: buildMatcher(cfg)
+  let ex = if simplePathMode: Excluder() else: buildExcluder(cfg)
+  let contentRx = if simplePathMode: none(Regex) else: compileContentRegex(cfg, cachedIC)
+  let needInfo = if simplePathMode: false else: needsFileInfo(cfg)
 
   for p in cfg.paths:
     if hasLimit and emitted >= cfg.limit:
@@ -1349,7 +1404,7 @@ proc runSearchStreamPaths*(cfg: Config; onPath: proc(p: string)): Stats =
                 if matchSimpleBase(fp, spKind, spCoreCmp, cachedIC):
                   inc result.matched
                   if cfg.countOnly:
-                    onPath("")
+                    discard
                   else:
                     let rel = relPathFor(fp)
                     onPath(outputPathFor(cfg, rel, fp))
@@ -1369,7 +1424,7 @@ proc runSearchStreamPaths*(cfg: Config; onPath: proc(p: string)): Stats =
                                  needInfo, includeHidden, result):
               inc result.matched
               if cfg.countOnly:
-                onPath("")
+                discard
               else:
                 onPath(outputPathFor(cfg, rel, fp))
               inc emitted

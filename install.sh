@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
-
+# this script uses python3 as well, install python3 if not already.
 REPO_DEFAULT="RobertFlexx/fastfind"
 DEFAULT_SYSTEM_PREFIX="/usr/local"
 DEFAULT_USER_PREFIX="${HOME}/.local"
