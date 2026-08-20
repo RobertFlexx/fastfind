@@ -81,10 +81,10 @@ fastfind holds its own while offering features that go beyond fd:
   built-in selection UI with `:exec` and `:rm` commands
 
 * Index-based search (optional)
-  fast incremental updates, lock-free reads
+  compact binary records, streaming reads, atomic refreshes
 
-* Single static binary
-  minimal dependencies
+* Compact native binary
+  PCRE1 is the only runtime library dependency of standard builds
 
 ---
 
@@ -180,8 +180,8 @@ In short:
 
 ## Final Take
 
-* fd is faster, and that is expected
-* ff is more capable, and that is intentional
+* ff is engineered to stay near fd on path traversal
+* ff adds richer filtering, NLP, semantic, interactive, and index workflows
 
 fastfind is about doing more with one command, without giving up too much performance.
 
@@ -196,7 +196,8 @@ fastfind is about doing more with one command, without giving up too much perfor
 
 ## Below is more information on fastfind. Read below to learn how to install, use, and/or compile this software.
 
-Cross-platform, single binary, zero runtime dependencies (written in Nim).
+Cross-platform native binary written in Nim. Standard builds use PCRE1; some
+release packages may bundle or statically link it.
 
 ### (SOFTWARE IS NOT MATURE, EXPECT BUGS!)
 
@@ -216,27 +217,26 @@ Expect occasional bugs or behavioral changes.
 `fastfind`/`ff` is a fast file finder with:
 
 * Glob/regex/fixed/fuzzy matching
-* Natural language queries (BETA)
+* Natural-language query planning with `--explain`
 * Size/time/content filters
 * Git-aware filtering
 * Interactive mode
 * Optional index-based search
 * Semantic symbol search
 
-Official aliases (recommended):
+Installed command names:
 
 * `ff`
-* `ffind`
-* `qf`
-* `sfind`
-
-(`qf` = quickfind, `sfind` = speed find)
+* `fastfind`
 
 ## Installation
 
 ### Quick install
 
-Install latest published binary with
+Install the latest published binary with the installer below. The installer
+requires a release-metadata SHA-256 digest and refuses unverified assets.
+As with any pipe-to-shell command, inspect or download the script first in a
+sensitive environment.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/RobertFlexx/fastfind/main/install.sh | bash
@@ -272,7 +272,7 @@ curl -fsSL https://raw.githubusercontent.com/RobertFlexx/fastfind/main/update.sh
 ```bash
 git clone https://github.com/RobertFlexx/fastfind
 cd fastfind
-nim c -d:danger -d:release --mm:orc --threads:on -d:lto --opt:speed \
+nim c -d:release --mm:orc --threads:on -d:lto --opt:speed \
   --passC:-O3 --passC:-march=native --passC:-flto --passL:-flto --passL:-s \
   -o:bin/fastfind src/ff.nim
 ```
@@ -282,14 +282,14 @@ Nushell:
 ```nu
 git clone https://github.com/RobertFlexx/fastfind
 cd fastfind
-nim c '-d:danger' '-d:release' '--mm:orc' '--threads:on' '-d:lto' '--opt:speed' '--passC:-O3' '--passC:-march=native' '--passC:-flto' '--passL:-flto' '--passL:-s' '-o:bin/fastfind' src/ff.nim
+nim c '-d:release' '--mm:orc' '--threads:on' '-d:lto' '--opt:speed' '--passC:-O3' '--passC:-march=native' '--passC:-flto' '--passL:-flto' '--passL:-s' '-o:bin/fastfind' src/ff.nim
 ```
 
 #### Build Flags Explained
 
 | Flag | Purpose | Recommended |
 |------|---------|--------------|
-| `-d:danger` | Remove debug checks, runtime validation | ✅ Required for speed |
+| `-d:danger` | Remove runtime safety checks | Not recommended |
 | `-d:release` | Enable compiler optimizations | ✅ Required |
 | `--mm:orc` | Memory manager (orc = best balance, arc = low memory) | Use `orc` |
 | `--threads:on` | Enable multi-threading support | ✅ Required |
@@ -305,7 +305,7 @@ nim c '-d:danger' '-d:release' '--mm:orc' '--threads:on' '-d:lto' '--opt:speed' 
 
 **For distribution, very optimized build (generic binary):**
 ```bash
-nim c -d:danger -d:release --mm:orc --threads:on -d:lto --opt:speed \
+nim c -d:release --mm:orc --threads:on -d:lto --opt:speed \
   --passC:-O3 --passC:-march=x86-64 --passC:-flto --passL:-flto --passL:-s \
   -o:bin/fastfind src/ff.nim
 ```
@@ -313,7 +313,7 @@ nim c -d:danger -d:release --mm:orc --threads:on -d:lto --opt:speed \
 Nushell:
 
 ```nu
-nim c '-d:danger' '-d:release' '--mm:orc' '--threads:on' '-d:lto' '--opt:speed' '--passC:-O3' '--passC:-march=x86-64' '--passC:-flto' '--passL:-flto' '--passL:-s' '-o:bin/fastfind' src/ff.nim
+nim c '-d:release' '--mm:orc' '--threads:on' '-d:lto' '--opt:speed' '--passC:-O3' '--passC:-march=x86-64' '--passC:-flto' '--passL:-flto' '--passL:-s' '-o:bin/fastfind' src/ff.nim
 ```
 
 **Debug build (for testing):**
@@ -329,14 +329,14 @@ nim c '--threads:on' '-o:bin/fastfind_debug' src/ff.nim
 
 **Production build (balanced):**
 ```bash
-nim c -d:danger -d:release --mm:arc --threads:on --opt:speed \
+nim c -d:release --mm:arc --threads:on --opt:speed \
   -o:bin/fastfind src/ff.nim
 ```
 
 Nushell:
 
 ```nu
-nim c '-d:danger' '-d:release' '--mm:arc' '--threads:on' '--opt:speed' '-o:bin/fastfind' src/ff.nim
+nim c '-d:release' '--mm:arc' '--threads:on' '--opt:speed' '-o:bin/fastfind' src/ff.nim
 ```
 
 ### Install to PATH
@@ -525,10 +525,23 @@ ff "terraform files"
 
 ### Content Search
 ```bash
-ff "python files containing TODO"
+ff "python files containing \"TODO and FIXME\" under ./src"
 ff "config files containing password"
 ff "log files containing error"
 ```
+
+### Inspect the query plan
+
+Natural-language queries are parsed into independent, intersecting filters
+(name, language/category, size, time, content, location, exclusions, sorting,
+depth and limit). Use `--explain` to inspect the plan without searching:
+
+```bash
+ff --explain 'find Python files larger than 5 MB modified in the last 2 weeks containing "TODO" under ./src excluding tests sort newest limit 20'
+```
+
+Compact clauses such as `ext:rs`, `name:parser`, `exclude:target`, `depth:4`
+and `limit:25` can be mixed with conversational text.
 
 > for more documentation, use `man ff` (or whatever alias you're using) in the terminal.
 
@@ -565,7 +578,7 @@ fastfind provides:
 | Recursive file discovery | Built-in                                       | Built-in                           | Built-in                                | Input-driven (needs producer)   |
 | Glob/regex/literal modes | Built-in switches                              | Primarily `-name`/`-regex` forms   | Built-in regex/glob modes               | Fuzzy/text filtering over input |
 | Fuzzy matching           | Built-in (`--fuzzy`)                           | No                                 | No                                      | Core strength                   |
-| Natural language queries | Built-in (BETA)                                | No                                 | No                                      | No                              |
+| Natural language queries | Built-in query planner                          | No                                 | No                                      | No                              |
 | Size/time filters        | Built-in (`--size`, `--changed`, etc.)         | Built-in (`-size`, `-mtime`, etc.) | Built-in (`--size`, `--changed-within`) | Via upstream command only       |
 | Content filtering        | Built-in (`--contains`)                        | Via `-exec grep`/pipeline          | Via `-X grep`/pipeline                  | Via upstream command only       |
 | Git-aware file filters   | Built-in (`--git-*`)                           | No                                 | Partial (`--no-ignore-vcs`, etc.)       | No                              |
@@ -581,9 +594,20 @@ fastfind provides:
 | Files changed in 1 day     | `ff "*.nim" --changed 1d`   | `find . -type f -name '*.nim' -mtime -1` | `fd --changed-within 1day --glob '*.nim'` | `find ... -mtime -1 \| fzf --filter '.nim'` |
 | Find files containing TODO | `ff "*.py" --contains TODO` | `find ... -exec grep -l TODO {} +`       | `fd --glob '*.py' -X grep -l TODO`        | `find ... \| xargs grep -l TODO \| fzf`     |
 
-## Performance and speed
+## Performance and speed (historical v2.1 baseline)
 
-All measurements below were run by executing commands repeatedly on the same local dataset.
+The tables below are retained as a historical v2.1 baseline. The current
+engine has since replaced the path hot loop, parallel accounting, content
+buffers, Git status parsing, and JSON index. Do not treat these old numbers as
+current release measurements.
+
+Current regression snapshot (15,100 files, warm cache, 200 complete scans on
+the development host): path-only output took 1.13 s with fastfind versus 1.10 s
+with fd 10.1.0. Supplying `-j 8` remained 1.13 s because fastfind adaptively
+keeps path-only work on its lower-overhead stream. For metadata sorting, 200
+indexed queries took 3.08 s versus 6.26 s for live traversal. These numbers are
+dataset-specific; run the same commands on your own workload before drawing a
+broader conclusion.
 
 Benchmark dataset:
 
@@ -634,9 +658,9 @@ System specs:
 
 ---
 
-### Summary
+### Historical summary
 
-- **fd is faster** - particularly for glob patterns and all-files traversal (2x faster)
+- **In the v2.1 baseline, fd was faster** - particularly for broad traversal
 - **ff single-thread** - faster than ff parallel mode (use default, no `-j`)
 - **ff built-in content search** - simpler than fd+grep pipeline (but slower)
 - **find** - surprisingly competitive for simple patterns
@@ -661,7 +685,7 @@ System specs:
 * Fuzzy matching
 * Semantic symbol search
 * More flexible filtering options
-* No dependencies (static binary available)
+* Compact binaries; PCRE1 runtime requirements are documented below
 
 ## Semantic code search
 
@@ -697,10 +721,10 @@ fastfind supports optional index-based search for faster repeated queries:
 # Build initial index
 ff --rebuild-index ~
 
-# Update index incrementally (fast)
+# Atomically refresh the index (bounded-memory streaming rebuild)
 ff --update-index ~
 
-# Verify and clean stale entries
+# Validate records and report stale entries
 ff --verify-index
 
 # Check index status
@@ -708,9 +732,17 @@ ff --index-status
 
 # Use index for searches
 ff "*.py" --use-index
+
+# Refuse to fall back to live traversal
+ff "*.py" --index-only
 ```
 
-The index stores file metadata (path, size, mtime, kind) for quick lookups. Incremental updates only process changed files.
+The v4 index is a home-grown, versioned binary format. Roots are stored once;
+each entry stores compact varints and a relative path. Queries decode records
+as a stream, so memory scales with returned matches instead of database size.
+Updates write a sibling temporary file and atomically replace the previous
+index only after a complete successful build. Legacy JSON indexes require one
+`--rebuild-index` migration.
 
 ## Interactive mode commands
 
@@ -718,7 +750,7 @@ In interactive mode, use these commands:
 ```bash
 :cd <path>     # Change directory
 :exec <cmd>   # Run command on selected files (use {} for path)
-:rm           # Delete selected files
+:rm           # Confirm, then delete selected files (never recursive)
 :sort <key>   # Sort by name/size/time
 :filter <f|d|l>  # Filter by type (file/dir/link)
 :h            # Toggle hidden files
@@ -762,10 +794,10 @@ ff "<natural language query>" [path ...]
 | Match mode        | `--glob`, `--regex`, `--fixed`, `--fuzzy`                                 |
 | Path mode         | `--name`, `--full-path`, `--full-match`                                   |
 | Traversal         | `-H`, `-L`, `-x`, `--gitignore`, `--max-depth`, `-j`                      |
-| Filters           | `--type`, `--size`, `--changed`, `--contains`, `--exclude`                |
+| Filters           | `--type`, `--extension`, `--size`, `--changed`, `--contains`, `--exclude` |
 | Git               | `--git-modified`, `--git-untracked`, `--git-tracked`, `--git-changed`     |
 | Output            | `--long`, `--json`, `--ndjson`, `--table`, `--sort`, `--limit`, `--stats` |
-| Interactive/index | `--interactive`, `--select`, `--use-index`, `--rebuild-index`, `--update-index`, `--verify-index` |
+| Interactive/index | `--interactive`, `--select`, `--use-index`, `--index-only`, `--rebuild-index`, `--update-index`, `--verify-index` |
 
 ### More examples
 

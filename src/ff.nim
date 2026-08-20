@@ -1,6 +1,6 @@
 # src/fastfind.nim
 import std/[times, os, strutils, algorithm, osproc, json]
-import ff/[cli, search, output, core, fuzzy, matchers, interactive, index, gitops, ranking, semantic]
+import ff/[cli, search, output, core, fuzzy, matchers, interactive, index, gitops, ranking, semantic, ansi]
 
 
 proc sortMatches(cfg: Config; ms: var seq[MatchResult]) =
@@ -71,7 +71,7 @@ proc applyShellPlaceholders(s: string; path: string): string =
 
 proc runExec(cfg: Config; m: MatchResult): int =
   if cfg.execCmd.len == 0: return 0
-  let p = outPath(cfg, m)
+  let p = m.absPath
 
   if cfg.execShell:
     var parts: seq[string] = @[applyShellPlaceholders(cfg.execCmd, p)]
@@ -97,7 +97,8 @@ proc runExec(cfg: Config; m: MatchResult): int =
 proc emitOne*(cfg: Config; m: MatchResult) =
   case cfg.outputMode
   of omPlain:
-    stdout.writeLine(outPath(cfg, m))
+    stdout.write(printedPath(cfg, m))
+    stdout.write(if cfg.print0: '\0' else: '\n')
 
   of omLong:
     var line = $kindChar(m.kind) & " " &
@@ -150,13 +151,15 @@ proc runSemanticSearch(cfg: Config): seq[MatchResult] =
     let rootAbs = absolutePath(rootPath)
     let matches = searchDirectoryForSymbols(rootAbs, symbolName, symbolType,
                                             cfg.ignoreCase, 
-                                            if cfg.limit > 0: cfg.limit else: 100)
+                                            if cfg.limit > 0: cfg.limit else: 100,
+                                            cfg.includeHidden, cfg.excludes)
     
     for sm in matches:
       var m: MatchResult
       m.absPath = sm.file
       m.path = sm.file
       m.relPath = safeRelPath(sm.file, rootAbs)
+      m.path = m.relPath
       m.name = extractFilename(sm.file) & ":" & $sm.line & " " & sm.symbolName
       m.lineNumber = sm.line
       
@@ -171,14 +174,17 @@ proc runSemanticSearch(cfg: Config): seq[MatchResult] =
       result.add(m)
 
 proc canUseIndexSearch(cfg: Config): bool =
-  cfg.useIndex and indexExists() and
+  cfg.useIndex and indexExists() and indexCovers(cfg.paths) and
   cfg.containsText.len == 0 and cfg.containsRegex.len == 0 and
-  cfg.excludes.len == 0 and cfg.pathMode == pmBaseName and
-  cfg.matchMode != mmRegex
+  not cfg.useGitignore and not cfg.oneFileSystem and not cfg.followSymlinks
 
 when isMainModule:
   let cfg = parseCli(commandLineParams())
   let autoThreads = if cfg.threads > 0: cfg.threads else: 1
+
+  if cfg.explainQuery:
+    printQueryPlan(cfg)
+    quit(0)
 
   # handle index management commands
   if cfg.indexCommand != icNone:
@@ -203,7 +209,8 @@ when isMainModule:
       let searchTerm = if cfg.searchFunction.len > 0: cfg.searchFunction
                        elif cfg.searchClass.len > 0: cfg.searchClass
                        else: cfg.searchSymbol
-      stderr.writeLine("fastfind: no symbols found matching: " & searchTerm)
+      if not cfg.quietErrors:
+        stderr.writeLine("fastfind: no symbols found matching: " & searchTerm)
       quit(1)
     
     sortMatches(cfg, matches)
@@ -211,16 +218,20 @@ when isMainModule:
     if cfg.limit > 0 and matches.len > cfg.limit:
       matches.setLen(cfg.limit)
     
-    emitResults(cfg, matches, Stats())
-    quit(0)
+    let exitCode = emitResults(cfg, matches, Stats())
+    quit(exitCode)
 
   let needsCollect =
     cfg.outputMode in [omJson, omTable] or
     cfg.sortKey != skNone or
     cfg.selectMode or
-    autoThreads > 1 or
+    # Threads earn their keep during content scans. For path-only searches,
+    # the lighter POSIX walk is faster even when -j is set.
+    (autoThreads > 1 and
+      (cfg.containsText.len > 0 or cfg.containsRegex.len > 0)) or
     cfg.fuzzyMode or
     cfg.rankMode != rmNone or
+    cfg.useIndex or
     cfg.gitModified or cfg.gitUntracked or cfg.gitTracked or cfg.gitChanged or
     (cfg.execCmd.len > 0)
 
@@ -231,12 +242,20 @@ when isMainModule:
     var searchCfg = cfg
     if cfg.sortKey != skNone or cfg.fuzzyMode or cfg.rankMode != rmNone:
       searchCfg.limit = 0
+    if cfg.gitModified or cfg.gitUntracked or cfg.gitTracked or cfg.gitChanged:
+      searchCfg.countOnly = false
     
     # ttry index first if enabled
     if canUseIndexSearch(searchCfg):
       res = searchIndex(searchCfg)
-      if res.matches.len == 0 and not cfg.indexOnly:
+      if res.stats.errors > 0:
+        if cfg.indexOnly:
+          stderr.writeLine("fastfind: index is corrupt; rebuild it with --update-index")
+          quit(2)
         res = runSearchCollect(searchCfg)
+    elif cfg.indexOnly:
+      stderr.writeLine("fastfind: no compatible index covers the requested path")
+      quit(2)
     else:
       res = runSearchCollect(searchCfg)
     
@@ -247,15 +266,16 @@ when isMainModule:
       applyGitFilters(cfg, matches)
 
     if cfg.countOnly:
-      stdout.writeLine($matches.len)
+      stdout.writeLine(if canUseIndexSearch(searchCfg): $res.stats.matched else: $matches.len)
       emitStatsIfNeeded(cfg, res.stats)
       quit(0)
 
     if matches.len == 0:
-      if cfg.naturalQuery.len > 0:
-        printNoMatchesNL(cfg.naturalQuery, if cfg.paths.len > 0: cfg.paths[0] else: ".")
-      elif pat0.len > 0:
-        printNoMatchesHint(pat0, modeStr(cfg))
+      if not cfg.quietErrors:
+        if cfg.naturalQuery.len > 0:
+          printNoMatchesNL(cfg.naturalQuery, if cfg.paths.len > 0: cfg.paths[0] else: ".")
+        elif pat0.len > 0:
+          printNoMatchesHint(pat0, modeStr(cfg))
       emitStatsIfNeeded(cfg, res.stats)
       quit(1)
 
@@ -275,7 +295,8 @@ when isMainModule:
       else:
         stdout.writeLine(outPath(cfg, chosen))
     else:
-      emitResults(cfg, matches, res.stats)
+      let exitCode = emitResults(cfg, matches, res.stats)
+      if exitCode != 0: quit(exitCode)
 
 
   else:
@@ -289,8 +310,8 @@ when isMainModule:
               discard
             else:
               inc matched
-              outputBuf.add(p)
-              outputBuf.add('\n')
+              outputBuf.add(terminalText(p, cfg.print0))
+              outputBuf.add(if cfg.print0: '\0' else: '\n')
               if outputBuf.len > 262140:
                 stdout.write(outputBuf)
                 outputBuf.setLen(0)
@@ -315,10 +336,11 @@ when isMainModule:
       stdout.write(outputBuf)
 
     if matched == 0:
-      if cfg.naturalQuery.len > 0:
-        printNoMatchesNL(cfg.naturalQuery, if cfg.paths.len > 0: cfg.paths[0] else: ".")
-      elif pat0.len > 0:
-        printNoMatchesHint(pat0, modeStr(cfg))
+      if not cfg.quietErrors:
+        if cfg.naturalQuery.len > 0:
+          printNoMatchesNL(cfg.naturalQuery, if cfg.paths.len > 0: cfg.paths[0] else: ".")
+        elif pat0.len > 0:
+          printNoMatchesHint(pat0, modeStr(cfg))
       emitStatsIfNeeded(cfg, stats)
       quit(1)
 

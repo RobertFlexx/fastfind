@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
-# THIS SCRIPT USES PYTHON3! it is recommended to isntall python3.
+# Python 3 is used to parse GitHub release metadata.
 REPO="${REPO:-RobertFlexx/fastfind}"
-RAW_BASE="https://raw.githubusercontent.com/${REPO}/main"
 
 OVERRIDE_PREFIX="${PREFIX:-/usr/local}"
 OVERRIDE_BIN_DIR="${BIN_DIR:-${OVERRIDE_PREFIX}/bin}"
@@ -16,6 +15,7 @@ cleanup_update() {
   if [ -n "${TMP_INSTALL_LIB:-}" ] && [ -f "${TMP_INSTALL_LIB}" ]; then
     rm -f "${TMP_INSTALL_LIB}"
   fi
+  return 0
 }
 
 trap cleanup_update EXIT INT TERM
@@ -37,6 +37,8 @@ download_update_dep() {
 resolve_install_lib() {
   local self_path=""
   local script_dir=""
+  local install_ref="${OVERRIDE_REQUESTED_TAG}"
+  local release_json=""
 
   self_path="${BASH_SOURCE[0]-}"
 
@@ -48,8 +50,24 @@ resolve_install_lib() {
     fi
   fi
 
+  if [ -z "$install_ref" ]; then
+    if command -v curl >/dev/null 2>&1; then
+      release_json="$(curl -fsSL --retry 3 -A fastfind-updater "https://api.github.com/repos/${REPO}/releases/latest")"
+    elif command -v wget >/dev/null 2>&1; then
+      release_json="$(wget -qO- --user-agent=fastfind-updater "https://api.github.com/repos/${REPO}/releases/latest")"
+    else
+      printf '%s\n' "error: curl or wget is required" >&2
+      exit 1
+    fi
+    install_ref="$(printf '%s' "$release_json" | tr -d '\n' | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
+  fi
+  [ -n "$install_ref" ] || { printf '%s\n' "error: could not resolve an immutable release for installer code" >&2; exit 1; }
+  case "$install_ref" in *[!A-Za-z0-9._-]*)
+    printf '%s\n' "error: unsafe release tag: ${install_ref}" >&2; exit 1 ;;
+  esac
+
   TMP_INSTALL_LIB="$(mktemp "${TMPDIR:-/tmp}/fastfind-install.XXXXXX.sh")"
-  download_update_dep "${RAW_BASE}/install.sh" "${TMP_INSTALL_LIB}"
+  download_update_dep "https://raw.githubusercontent.com/${REPO}/${install_ref}/install.sh" "${TMP_INSTALL_LIB}"
   INSTALL_LIB="${TMP_INSTALL_LIB}"
 }
 
@@ -96,7 +114,6 @@ lookup_asset_sha256() {
 
   [ -n "${RELEASE_JSON:-}" ] || return 0
   command -v python3 >/dev/null 2>&1 || return 0
-# since this embeds python because bash is a genuinely shit language, install python3 :)
   RELEASE_JSON_PAYLOAD="$RELEASE_JSON" python3 - "$url" <<'PY'
 import json
 import os

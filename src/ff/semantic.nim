@@ -1,5 +1,6 @@
 # src/ff/semantic.nim
-import std/[os, strutils, re, options]
+import std/[os, strutils, re, options, sets]
+import matchers
 
 
 type
@@ -220,7 +221,7 @@ proc getJavaPatterns(): LanguagePatterns =
     re"^\s*(?:public|private|protected)?\s*static\s+final\s+\w+\s+(\w+)\s*="
   ]
 
-proc getPatterns(lang: Language): LanguagePatterns =
+proc buildPatterns(lang: Language): LanguagePatterns =
   case lang
   of langNim: getNimPatterns()
   of langPython: getPythonPatterns()
@@ -232,6 +233,18 @@ proc getPatterns(lang: Language): LanguagePatterns =
   of langGo: getGoPatterns()
   of langJava: getJavaPatterns()
   of langUnknown: LanguagePatterns()
+
+var
+  PatternCache: array[Language, LanguagePatterns]
+  PatternsReady: array[Language, bool]
+
+proc getPatterns(lang: Language): LanguagePatterns =
+  ## Build a language's regexes the first time they're needed, then reuse them.
+  ## Plain filename searches never pay that startup cost.
+  if not PatternsReady[lang]:
+    PatternCache[lang] = buildPatterns(lang)
+    PatternsReady[lang] = true
+  PatternCache[lang]
 
 proc matchesName(pattern: string; name: string; ignoreCase: bool): bool =
   if pattern.len == 0: return true
@@ -268,7 +281,8 @@ proc extractSymbolName(line: string; rx: Regex): Option[string] =
 
 proc searchFileForSymbols*(path: string; symbolName: string; 
                            symbolType: SymbolType; 
-                           ignoreCase: bool = true): seq[SymbolMatch] =
+                           ignoreCase: bool = true;
+                           maxResults: int = 100): seq[SymbolMatch] =
   result = @[]
   let lang = detectLanguage(path)
   if lang == langUnknown: return
@@ -279,39 +293,76 @@ proc searchFileForSymbols*(path: string; symbolName: string;
   defer: close(f)
   
   var patternsToCheck: seq[tuple[rx: Regex, st: SymbolType]] = @[]
+  template addPatterns(field: untyped; kind: SymbolType) =
+    for rx in field: patternsToCheck.add((rx, kind))
   case symbolType
-  of symFunction:
-    for rx in patterns.functions: patternsToCheck.add((rx, symFunction))
-  of symClass:
-    for rx in patterns.classes: patternsToCheck.add((rx, symClass))
+  of symFunction: addPatterns(patterns.functions, symFunction)
+  of symClass: addPatterns(patterns.classes, symClass)
+  of symStruct: addPatterns(patterns.structs, symStruct)
+  of symEnum: addPatterns(patterns.enums, symEnum)
+  of symInterface: addPatterns(patterns.interfaces, symInterface)
+  of symMethod: addPatterns(patterns.methods, symMethod)
+  of symVariable: addPatterns(patterns.variables, symVariable)
+  of symConstant: addPatterns(patterns.constants, symConstant)
+  of symType: addPatterns(patterns.types, symType)
   of symAny:
-    for rx in patterns.functions: patternsToCheck.add((rx, symFunction))
-    for rx in patterns.classes: patternsToCheck.add((rx, symClass))
-  else: discard
+    addPatterns(patterns.functions, symFunction)
+    addPatterns(patterns.classes, symClass)
+    addPatterns(patterns.structs, symStruct)
+    addPatterns(patterns.enums, symEnum)
+    addPatterns(patterns.interfaces, symInterface)
+    addPatterns(patterns.methods, symMethod)
+    addPatterns(patterns.variables, symVariable)
+    addPatterns(patterns.constants, symConstant)
+    addPatterns(patterns.types, symType)
+
+  if patternsToCheck.len == 0: return
+  let searchName = if ignoreCase: symbolName.toLowerAscii() else: symbolName
   
   var lineNum = 0
   for line in f.lines:
+    if result.len >= maxResults: break
     inc lineNum
+    var seen = initHashSet[tuple[kind: SymbolType, name: string]]()
     for (rx, st) in patternsToCheck:
       let nameOpt = extractSymbolName(line, rx)
       if nameOpt.isSome:
         let name = nameOpt.get
         let matchName = if ignoreCase: name.toLowerAscii() else: name
-        let searchName = if ignoreCase: symbolName.toLowerAscii() else: symbolName
-        if matchName.contains(searchName) or searchName == "*":
-          result.add(SymbolMatch(file: path, line: lineNum, column: 0, 
+        let key = (kind: st, name: name)
+        if key notin seen and (matchName.contains(searchName) or searchName == "*"):
+          seen.incl(key)
+          result.add(SymbolMatch(file: path, line: lineNum,
+                                  column: max(0, line.find(name)) + 1,
                                   symbolName: name, symbolType: st, context: line.strip()))
+          if result.len >= maxResults: break
 
 proc searchDirectoryForSymbols*(rootPath: string; symbolName: string;
                                 symbolType: SymbolType;
                                 ignoreCase: bool = true;
-                                maxResults: int = 100): seq[SymbolMatch] =
+                                maxResults: int = 100;
+                                includeHidden: bool = false;
+                                excludes: seq[string] = @[]): seq[SymbolMatch] =
   result = @[]
-  for path in walkDirRec(rootPath):
-    if result.len >= maxResults: break
-    let lang = detectLanguage(path)
-    if lang == langUnknown: continue
-    let matches = searchFileForSymbols(path, symbolName, symbolType, ignoreCase)
-    for m in matches:
-      if result.len >= maxResults: break
-      result.add(m)
+  if maxResults <= 0: return
+  let root = absolutePath(rootPath)
+  var excluder = Excluder(patterns: excludes)
+  excluder.compile()
+  var stack = @[root]
+  while stack.len > 0 and result.len < maxResults:
+    let directory = stack.pop()
+    try:
+      for kind, path in walkDir(directory):
+        let name = extractFilename(path)
+        let rel = relativePath(path, root)
+        if not includeHidden and name.len > 0 and name[0] == '.': continue
+        if excludes.len > 0 and excluder.isExcluded(rel): continue
+        if kind == pcDir:
+          stack.add(path)
+        elif kind == pcFile and detectLanguage(path) != langUnknown:
+          let matches = searchFileForSymbols(path, symbolName, symbolType,
+            ignoreCase, maxResults - result.len)
+          result.add(matches)
+          if result.len >= maxResults: break
+    except OSError:
+      continue

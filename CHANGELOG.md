@@ -1,5 +1,26 @@
 # Changelog - fastfind v2.2.2
 
+## Unreleased - Engine Overhaul
+
+- Replaced the object-heavy JSON index with the compact, versioned FFIDX004
+  binary stream: root deduplication, relative paths, varint metadata, bounded
+  decoding, atomic refreshes, coverage checks, and corrupt-index fallback.
+- Rebuilt natural-language search as an explainable query planner with quoted
+  phrases, intersecting filters, compact clauses, size/date/duration parsing,
+  sorting, depth, limits, and case-preserved paths/content.
+- Expanded semantic symbol search to every supported symbol category, cached
+  language grammars lazily, pruned hidden/excluded directories, and bounded
+  per-file results.
+- Fixed skipped metadata, followed-symlink cycles, nested and ordered Gitignore
+  rules, NUL-safe Git status parsing, content boundaries/full-file defaults,
+  case-aware content matching, and child-command exit propagation.
+- Added adaptive path traversal, thread-local parallel accounting, bounded work
+  stealing, streaming JSON output, `--extension`, `--print0`, `--index-only`,
+  `--explain`, safe terminal output, confirmed TUI deletion, fail-closed release
+  verification, immutable updater sourcing, regression tests, and pinned CI.
+
+---
+
 ## v2.2.2 - Performance and Correctness Update
 
 This patch release improves large-tree traversal speed and tightens POSIX file-type behavior while preserving existing search features.

@@ -182,6 +182,18 @@ proc incSkipped*(s: AtomicStats) = discard s.skipped.fetchAdd(1)
 proc addBytesRead*(s: AtomicStats, bytes: int64) = discard s.bytesRead.fetchAdd(bytes)
 proc matchedCount*(s: AtomicStats): int = s.matched.load()
 
+proc addStats*(s: AtomicStats; local: Stats) =
+  ## Each worker keeps its own counters and merges them when it finishes. That
+  ## avoids fighting over atomics for every directory entry.
+  discard s.visited.fetchAdd(local.visited)
+  discard s.visitedFiles.fetchAdd(local.visitedFiles)
+  discard s.visitedDirs.fetchAdd(local.visitedDirs)
+  discard s.visitedLinks.fetchAdd(local.visitedLinks)
+  discard s.matched.fetchAdd(local.matched)
+  discard s.errors.fetchAdd(local.errors)
+  discard s.skipped.fetchAdd(local.skipped)
+  discard s.bytesRead.fetchAdd(local.bytesRead)
+
 proc toStats*(s: AtomicStats, startTime, endTime: times.Time): Stats =
   result.visited = s.visited.load()
   result.visitedFiles = s.visitedFiles.load()

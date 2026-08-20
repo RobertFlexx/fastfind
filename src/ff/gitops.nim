@@ -1,4 +1,4 @@
-import std/[os, strutils, osproc, sets, tables]
+import std/[os, strutils, osproc, streams, sets, tables]
 import core, cli
 
 type
@@ -15,16 +15,6 @@ type
     tracked*: HashSet[string]
 
 var gitCacheTable = initTable[string, GitCache]()
-
-proc quoteShellArg(s: string): string =
-  if s.len == 0: return "''"
-  result = "'"
-  for c in s:
-    if c == '\'':
-      result.add("'\\''")
-    else:
-      result.add(c)
-  result.add("'")
 
 proc findGitRoot*(startPath: string): string =
   if startPath.len == 0:
@@ -52,13 +42,12 @@ proc isGitRepo*(path: string): bool =
 proc runGitCommand(root: string; args: openArray[string]; timeout: int = 5000): tuple[output: string, success: bool] =
   if root.len == 0:
     return ("", false)
-  let quotedRoot = quoteShellArg(root)
-  var cmd = "git -C " & quotedRoot
-  for arg in args:
-    cmd.add(" ")
-    cmd.add(quoteShellArg(arg))
   try:
-    let (output, code) = execCmdEx(cmd, options = {poUsePath})
+    let process = startProcess("git", workingDir = root, args = @args,
+      options = {poUsePath, poStdErrToStdOut})
+    let output = process.outputStream.readAll()
+    let code = process.waitForExit(timeout)
+    process.close()
     result = (output, code == 0)
   except CatchableError:
     result = ("", false)
@@ -70,10 +59,8 @@ proc parseGitStatusLine(line: string; root: string): tuple[path: string, status:
   var relPath = ""
   if line.len > 3:
     relPath = line[3..^1]
-  let arrowPos = relPath.find(" -> ")
-  if arrowPos >= 0:
-    relPath = relPath[arrowPos + 4..^1]
-  relPath = relPath.strip(chars = {'"', ' ', '\t'})
+  # With `-z`, Git gives us literal paths. Don't trim, unquote, or try to split
+  # rename-looking text here.
   if relPath.len == 0:
     return ("", {})
   let fullPath = root / relPath
@@ -97,10 +84,10 @@ proc getGitModified*(root: string): HashSet[string] =
   result = initHashSet[string]()
   if root.len == 0:
     return
-  let (output, success) = runGitCommand(root, ["status", "--porcelain", "-uno"])
+  let (output, success) = runGitCommand(root, ["status", "--porcelain=v1", "-z", "-uno"])
   if not success:
     return
-  for line in output.splitLines():
+  for line in output.split('\0'):
     if line.len < 3:
       continue
     let (path, status) = parseGitStatusLine(line, root)
@@ -111,37 +98,31 @@ proc getGitUntracked*(root: string): HashSet[string] =
   result = initHashSet[string]()
   if root.len == 0:
     return
-  let (output, success) = runGitCommand(root, ["ls-files", "--others", "--exclude-standard"])
+  let (output, success) = runGitCommand(root, ["ls-files", "-z", "--others", "--exclude-standard"])
   if not success:
     return
-  for line in output.splitLines():
-    let trimmed = line.strip()
-    if trimmed.len > 0:
-      result.incl(root / trimmed)
+  for path in output.split('\0'):
+    if path.len > 0: result.incl(root / path)
 
 proc getGitTracked*(root: string): HashSet[string] =
   result = initHashSet[string]()
   if root.len == 0:
     return
-  let (output, success) = runGitCommand(root, ["ls-files", "--cached"])
+  let (output, success) = runGitCommand(root, ["ls-files", "-z", "--cached"])
   if not success:
     return
-  for line in output.splitLines():
-    let trimmed = line.strip()
-    if trimmed.len > 0:
-      result.incl(root / trimmed)
+  for path in output.split('\0'):
+    if path.len > 0: result.incl(root / path)
 
 proc getGitStaged*(root: string): HashSet[string] =
   result = initHashSet[string]()
   if root.len == 0:
     return
-  let (output, success) = runGitCommand(root, ["diff", "--cached", "--name-only"])
+  let (output, success) = runGitCommand(root, ["diff", "--cached", "--name-only", "-z"])
   if not success:
     return
-  for line in output.splitLines():
-    let trimmed = line.strip()
-    if trimmed.len > 0:
-      result.incl(root / trimmed)
+  for path in output.split('\0'):
+    if path.len > 0: result.incl(root / path)
 
 proc getGitChanged*(root: string): HashSet[string] =
   result = getGitModified(root) + getGitUntracked(root)
@@ -152,9 +133,13 @@ proc loadGitCache*(root: string): GitCache =
   if root in gitCacheTable:
     return gitCacheTable[root]
   result = GitCache(root: root)
-  let (output, success) = runGitCommand(root, ["status", "--porcelain"])
+  let (output, success) = runGitCommand(root, ["status", "--porcelain=v1", "-z"])
   if success:
-    for line in output.splitLines():
+    var skipRenameSource = false
+    for line in output.split('\0'):
+      if skipRenameSource:
+        skipRenameSource = false
+        continue
       if line.len < 3:
         continue
       let (path, status) = parseGitStatusLine(line, root)
@@ -166,12 +151,12 @@ proc loadGitCache*(root: string): GitCache =
         result.untracked.incl(path)
       if gsTracked in status:
         result.tracked.incl(path)
-  let (trackedOutput, trackedSuccess) = runGitCommand(root, ["ls-files", "--cached"])
+      if line[0] in {'R', 'C'} or line[1] in {'R', 'C'}:
+        skipRenameSource = true
+  let (trackedOutput, trackedSuccess) = runGitCommand(root, ["ls-files", "-z", "--cached"])
   if trackedSuccess:
-    for line in trackedOutput.splitLines():
-      let trimmed = line.strip()
-      if trimmed.len > 0:
-        result.tracked.incl(root / trimmed)
+    for path in trackedOutput.split('\0'):
+      if path.len > 0: result.tracked.incl(root / path)
   gitCacheTable[root] = result
 
 proc clearGitCache*() =
@@ -183,16 +168,17 @@ proc applyGitFilters*(cfg: Config; matches: var seq[MatchResult]) =
   if matches.len == 0:
     return
   var rootsTable = initTable[string, GitCache]()
-  var pathToRoot = initTable[string, string]()
-  for m in matches:
-    if m.absPath notin pathToRoot:
-      let root = findGitRoot(m.absPath)
-      pathToRoot[m.absPath] = root
-      if root.len > 0 and root notin rootsTable:
-        rootsTable[root] = loadGitCache(root)
+  for path in cfg.paths:
+    let root = findGitRoot(path)
+    if root.len > 0 and root notin rootsTable:
+      rootsTable[root] = loadGitCache(root)
   var filtered = newSeqOfCap[MatchResult](matches.len)
   for m in matches:
-    let root = pathToRoot.getOrDefault(m.absPath, "")
+    var root = ""
+    for candidate in rootsTable.keys:
+      if (m.absPath == candidate or m.absPath.startsWith(candidate & DirSep)) and
+          candidate.len > root.len:
+        root = candidate
     if root.len == 0:
       continue
     let cache = rootsTable.getOrDefault(root, GitCache())

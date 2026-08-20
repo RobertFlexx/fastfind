@@ -15,6 +15,9 @@ proc outPath*(cfg: Config; m: MatchResult): string =
   elif cfg.relative: m.relPath
   else: m.path
 
+proc printedPath*(cfg: Config; m: MatchResult): string =
+  terminalText(outPath(cfg, m), cfg.print0)
+
 proc kindChar*(k: EntryType): char =
   case k
   of etFile: 'f'
@@ -107,10 +110,11 @@ proc fmtCodeMatch(cfg: Config; m: MatchResult; colored: bool): string =
 proc emitPlain(cfg: Config; matches: seq[MatchResult]) =
   let showCode = isCodeSearch(cfg)
   for m in matches:
+    let terminator = if cfg.print0: '\0' else: '\n'
     if showCode and m.lineNumber > 0:
-      stdout.writeLine outPath(cfg, m) & ":" & $m.lineNumber
+      stdout.write(printedPath(cfg, m) & ":" & $m.lineNumber & terminator)
     else:
-      stdout.writeLine outPath(cfg, m)
+      stdout.write(printedPath(cfg, m) & terminator)
 
 proc emitLong(cfg: Config; matches: seq[MatchResult]) =
   let showCode = isCodeSearch(cfg)
@@ -119,7 +123,7 @@ proc emitLong(cfg: Config; matches: seq[MatchResult]) =
     var line = $kindChar(m.kind) & " " &
                align($m.size, 10) & " " &
                fmtTime(m.mtime) & " " &
-               outPath(cfg, m)
+               printedPath(cfg, m)
     if m.lineNumber > 0:
       line &= c(":" & $m.lineNumber, Yellow, colored)
     if cfg.fuzzyMode and cfg.showFuzzyScore:
@@ -129,10 +133,12 @@ proc emitLong(cfg: Config; matches: seq[MatchResult]) =
     stdout.writeLine line
 
 proc emitJson(cfg: Config; matches: seq[MatchResult]) =
-  var arr = newJArray()
-  for m in matches:
-    arr.add cfg.toJson(m)
-  stdout.writeLine $arr
+  # Write the array as we go instead of keeping a second copy of every result.
+  stdout.write('[')
+  for i, m in matches:
+    if i > 0: stdout.write(',')
+    stdout.write($cfg.toJson(m))
+  stdout.writeLine("]")
 
 proc emitNdJson(cfg: Config; matches: seq[MatchResult]) =
   for m in matches:
@@ -155,20 +161,20 @@ proc emitTable(cfg: Config; matches: seq[MatchResult]) =
     var line = padRight($kindChar(m.kind), 4) & " | " &
                align($m.size, 10) & " | " &
                fmtTime(m.mtime) & " | " &
-               outPath(cfg, m)
+               printedPath(cfg, m)
     if showCode:
       let lineStr = if m.lineNumber > 0: $m.lineNumber else: "-"
       line &= " | " & align(lineStr, 4) & " | " & codeSearchType(cfg) & ":" & codeSearchTarget(cfg)
     stdout.writeLine line
 
-proc emitResults*(cfg: Config; matches: seq[MatchResult]; stats: Stats) =
+proc emitResults*(cfg: Config; matches: seq[MatchResult]; stats: Stats): int =
   if cfg.countOnly:
     stdout.writeLine($matches.len)
     emitStatsIfNeeded(cfg, stats)
-    return
+    return 0
 
   if cfg.execCmd.len > 0:
-    discard execForMatches(cfg, matches)
+    result = execForMatches(cfg, matches)
     emitStatsIfNeeded(cfg, stats)
     return
   

@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Install PCRE runtime
+        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends libpcre3
+
+      - name: Set up Nim
+        uses: jiro4989/setup-nim-action@cb1fc1270b117457dd0d9f610ec981fad3369cec # v2
+        with:
+          nim-version: 2.2.10
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build optimized threaded binary
+        run: nim c --mm:orc --threads:on -d:release --opt:speed -o:/tmp/fastfind-under-test src/ff.nim
+
+      - name: Run parser and matcher tests
+        run: nim c -r --mm:orc --threads:on --outdir:/tmp tests/test_nlp.nim
+
+      - name: Run CLI regression tests
+        run: bash tests/cli_regression.sh /tmp/fastfind-under-test
+
+      - name: Validate shell scripts and patch hygiene
+        run: |
+          bash -n install.sh
+          bash -n update.sh
+          git diff --check

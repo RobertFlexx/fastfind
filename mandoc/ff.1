@@ -160,8 +160,8 @@ Fastfind can respect .gitignore rules:
 
 .PP
 .nf
-$ fastfind "*.py" --gitignore   # respect .gitignore (default)
-$ fastfind "*.py" --no-gitignore # ignore .gitignore
+$ fastfind "*.py" --gitignore    # respect repository ignore rules
+$ fastfind "*.py" --no-gitignore # do not use repository ignore rules (default)
 .fi
 
 .SH FILE FILTERS
@@ -208,6 +208,22 @@ Search file contents (not filenames):
 .nf
 $ fastfind "*.py" --contains "TODO"
 $ fastfind "*.js" --contains "export const"
+$ fastfind "*.nim" --contains-re "proc\\s+parse"
+$ fastfind "*" --contains TODO --max-bytes 10M
+.fi
+
+Content search scans complete files by default. Use
+.B --max-bytes
+to impose a per-file cap, and
+.B --binary
+to permit files containing NUL bytes.
+
+.SS Extension Filter
+Use a repeatable extension constraint independently of the name pattern:
+
+.PP
+.nf
+$ fastfind parser -E nim -E nims
 .fi
 
 .SS Exclusion Patterns
@@ -286,19 +302,51 @@ $ fastfind "*.tmp" --exec "rm {}"       # delete temp files
 
 The {} placeholder is replaced with the file path.
 
-.SH NATURAL LANGUAGE QUERIES (BETA)
+.SH NATURAL LANGUAGE QUERY PLANNER
 
-Fastfind can interpret simple natural language queries:
+Fastfind turns natural language into intersecting name, category/language,
+size, time, content, location, exclusion, ordering, depth, and limit filters:
 
 .PP
 .nf
 $ fastfind "python files modified this week"
 $ fastfind "large log files bigger than 10MB"
-$ fastfind "text files containing TODO in ~/projects"
+$ fastfind "text files containing 'TODO FIXME' under ~/projects excluding vendor"
 $ fastfind "images older than 30 days"
+$ fastfind --explain "rust files named parser larger than 5 KB sort newest limit 20"
 .fi
 
-This feature is experimental (BETA) and may not handle all queries perfectly.
+Quoted phrases and path case are preserved. Compact clauses such as
+.BR ext:rs ,
+.BR name:parser ,
+.BR exclude:target ,
+.BR depth:4 ,
+and
+.B limit:25
+may be mixed with conversational text. Use
+.B --explain
+to inspect the plan without running a search.
+
+.SH INDEXED SEARCH
+
+The optional v4 index is a compact binary record stream. Roots are stored
+once, paths are relative, integer metadata uses varints, and queries retain
+only returned matches in memory. Builds use a temporary sibling and atomic
+replacement, so an interrupted refresh preserves the prior index.
+
+.PP
+.nf
+$ fastfind --rebuild-index ~/projects
+$ fastfind --update-index ~/projects
+$ fastfind --index-status
+$ fastfind --verify-index
+$ fastfind "*.nim" --use-index ~/projects
+$ fastfind "*.nim" --index-only ~/projects
+.fi
+
+.B --index-only
+returns an error rather than falling back when no compatible healthy index
+covers the requested roots. Legacy JSON indexes require one rebuild.
 
 .SH INTERACTIVE MODE
 
@@ -358,7 +406,7 @@ Use with other tools:
 
 .PP
 .nf
-$ fastfind "*.py" | xargs wc -l              # count lines
+$ fastfind -0 "*.py" | xargs -0 wc -l        # count lines safely
 $ fastfind "*.rs" | rg "fn main"             # search content
 $ fastfind -0 "*.txt" | xargs -0 rm          # safe deletion
 .fi
@@ -381,7 +429,11 @@ time fastfind "*" /path -j 8 --contains "pattern"
 
 .TP
 .B HOME
-User home directory, used for .gitignore discovery.
+User home directory, used for default configuration and index storage.
+
+.TP
+.B FASTFIND_INDEX
+Override the binary index path. Useful for isolated projects and tests.
 
 .TP
 .B XDG_CONFIG_HOME
@@ -401,19 +453,21 @@ Success - at least one match found.
 No matches found.
 .IP 2 4
 Error - invalid arguments, filesystem error, or other failure.
+.IP other 4
+When
+.B --exec
+or
+.B --exec-cmd
+is used, a failing child command's exit status is propagated.
 
-.SH LIMITATIONS
+.SH SAFETY
 
-Note that fastfind is still early in development (BETA software). Some limitations apply:
-
-.IP \(bu 2
-The parallel mode (-j) is slower than single-threaded for simple listings.
-.IP \(bu
-Natural language queries are experimental.
-.IP \(bu
-Some edge cases in gitignore handling may not work perfectly.
-.IP \(bu
-The index mode is not yet fully implemented.
+When standard output is a terminal, control bytes in filenames are escaped so
+they cannot inject terminal sequences. Piped output remains byte-exact; use
+.B -0, --print0
+for unambiguous automation. Interactive deletion asks for confirmation and
+never recursively deletes directories. Followed directory symlinks are
+deduplicated by filesystem identity to prevent cycles.
 
 .SH REPORTING BUGS
 

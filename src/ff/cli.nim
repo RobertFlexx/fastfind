@@ -25,6 +25,7 @@ type
     includeHidden*: bool
     followSymlinks*: bool
     excludes*: seq[string]
+    extensions*: seq[string]
     oneFileSystem*: bool
     useGitignore*: bool
     minDepth*: int
@@ -45,6 +46,7 @@ type
     searchClass*: string
     searchSymbol*: string
     outputMode*: OutputMode
+    print0*: bool
     absolute*: bool
     relative*: bool
     sortKey*: SortKey
@@ -68,6 +70,9 @@ type
     indexOnly*: bool
     indexCommand*: IndexCommand
     naturalQuery*: string
+    explainQuery*: bool
+    queryInterpretation*: seq[string]
+    queryWarnings*: seq[string]
     justHelp*: bool
     justVersion*: bool
     modeExplicit*: bool
@@ -81,7 +86,7 @@ const
   # note: these were in here and unused
   # i have no idea what they do
   # leaving them in comment form in case they're important!
-  ShortOptsWithValue = {'j', 't', 'd', 'e', 's', 'n'}
+  ShortOptsWithValue = {'j', 't', 'd', 'e', 'E', 's', 'n'}
   # ShortOptsNoValue = {'h', 'v', 'q', 'l', 'r', 'c', 'H', 'L', 'x', 'i', 'f'}
   
   # LongOptsNoValue = @[
@@ -111,6 +116,7 @@ proc defaultConfig*(): Config =
   result.includeHidden = false
   result.followSymlinks = false
   result.excludes = @[]
+  result.extensions = @[]
   result.oneFileSystem = false
   result.useGitignore = false
   result.minDepth = 0
@@ -121,7 +127,7 @@ proc defaultConfig*(): Config =
   result.olderThan = none(Time)
   result.containsText = ""
   result.containsRegex = ""
-  result.maxBytes = 1024 * 1024
+  result.maxBytes = 0
   result.allowBinary = false
   result.gitModified = false
   result.gitUntracked = false
@@ -131,6 +137,7 @@ proc defaultConfig*(): Config =
   result.searchClass = ""
   result.searchSymbol = ""
   result.outputMode = omPlain
+  result.print0 = false
   result.absolute = false
   result.relative = false
   result.sortKey = skNone
@@ -154,6 +161,7 @@ proc defaultConfig*(): Config =
   result.indexOnly = false
   result.indexCommand = icNone
   result.naturalQuery = ""
+  result.explainQuery = false
   result.modeExplicit = false
   result.pathModeExplicit = false
 
@@ -304,6 +312,7 @@ proc helpText(useColor: bool): string =
   result.add(B("USAGE") & "\n")
   result.add("  " & C("ff") & " [options] <pattern> [path] ...\n")
   result.add("  " & C("ff") & " \"natural language query\"\n")
+  result.add("  " & C("ff") & " --explain \"natural language query\"\n")
   result.add("  " & C("ff") & " --interactive\n")
   result.add("\n")
   
@@ -337,7 +346,11 @@ proc helpText(useColor: bool): string =
   result.add(row("--changed DUR", "Modified within"))
   result.add(row("--recent", "Modified last 24h"))
   result.add(row("--contains TXT", "Search contents"))
+  result.add(row("--contains-re REGEX", "Search contents with regex"))
+  result.add(row("--max-bytes SIZE", "Content scan cap (default: unlimited)"))
+  result.add(row("--binary", "Allow binary files in content search"))
   result.add(row("--exclude PAT", "Exclude patterns"))
+  result.add(row("-E, --extension EXT", "Require extension (repeatable)"))
   result.add("\n")
   
   result.add(G("GIT") & "\n")
@@ -350,6 +363,7 @@ proc helpText(useColor: bool): string =
   result.add(row("-l", "Long format"))
   result.add(row("--json", "JSON output"))
   result.add(row("--ndjson", "NDJSON output"))
+  result.add(row("-0, --print0", "NUL-delimit paths (pipeline-safe)"))
   result.add(row("--table", "Table format"))
   result.add(row("--absolute", "Absolute paths"))
   result.add(row("--relative", "Relative paths"))
@@ -370,6 +384,7 @@ proc helpText(useColor: bool): string =
   
   result.add(C("INDEX") & "\n")
   result.add(row("--use-index", "Use cached index"))
+  result.add(row("--index-only", "Require a compatible healthy index"))
   result.add(row("--rebuild-index", "Full rebuild"))
   result.add(row("--update-index", "Incremental update"))
   result.add(row("--verify-index", "Check validity"))
@@ -448,7 +463,15 @@ proc parseTypeValue(val: string): set[EntryType] =
   of "d", "dir", "dirs", "directory", "directories": result = {etDir}
   of "l", "link", "links", "symlink", "symlinks": result = {etLink}
   else:
-    raise newException(ValueError, "unknown type: " & val)
+    if t.len > 1 and t.allCharsInSet({'f', 'd', 'l'}):
+      for c in t:
+        case c
+        of 'f': result.incl(etFile)
+        of 'd': result.incl(etDir)
+        of 'l': result.incl(etLink)
+        else: discard
+    else:
+      raise newException(ValueError, "unknown type: " & val)
 
 proc parseSortKey(val: string): SortKey =
   let s = val.strip().toLowerAscii()
@@ -584,6 +607,7 @@ proc parseCli*(args: seq[string]): Config =
         of "long": result.outputMode = omLong
         of "json": result.outputMode = omJson
         of "ndjson": result.outputMode = omNdJson
+        of "print0": result.print0 = true
         of "table": result.outputMode = omTable
         of "absolute": result.absolute = true
         of "relative": result.relative = true
@@ -593,6 +617,7 @@ proc parseCli*(args: seq[string]): Config =
         of "interactive": result.interactiveMode = true
         of "select": result.selectMode = true
         of "use-index": result.useIndex = true
+        of "index-only": result.useIndex = true; result.indexOnly = true
         of "rebuild-index": result.indexCommand = icRebuild
         of "update-index": result.indexCommand = icUpdate
         of "verify-index": result.indexCommand = icVerify
@@ -602,6 +627,7 @@ proc parseCli*(args: seq[string]): Config =
         of "verbose": result.verbose = true
         of "quiet-errors": result.quietErrors = true
         of "recent": result.newerThan = some(getTime() - initDuration(hours = 24))
+        of "explain": result.explainQuery = true
         of "threads":
           val = getOptValue(processedArgs, i, val)
           result.threads = max(0, parseIntSafe(val))
@@ -619,6 +645,11 @@ proc parseCli*(args: seq[string]): Config =
         of "exclude":
           val = getOptValue(processedArgs, i, val)
           if val.len > 0: result.excludes.add(val)
+        of "extension", "ext":
+          val = getOptValue(processedArgs, i, val)
+          let ext = if val.startsWith("."): val else: "." & val
+          result.extensions.add(ext.toLowerAscii())
+          result.types = result.types * {etFile}
         of "size":
           val = getOptValue(processedArgs, i, val)
           let r = parseSizeExpr(val)
@@ -697,6 +728,7 @@ proc parseCli*(args: seq[string]): Config =
           of 'l': result.outputMode = omLong
           of 'r': result.reverse = true
           of 'c': result.countOnly = true
+          of '0': result.print0 = true
           of 'H': result.includeHidden = true
           of 'L': result.followSymlinks = true
           of 'x': result.oneFileSystem = true
@@ -720,6 +752,12 @@ proc parseCli*(args: seq[string]): Config =
             if shortVal.len == 0:
               shortVal = getOptValue(processedArgs, i, "")
             result.excludes.add(shortVal)
+          of 'E':
+            if shortVal.len == 0:
+              shortVal = getOptValue(processedArgs, i, "")
+            let ext = if shortVal.startsWith("."): shortVal else: "." & shortVal
+            result.extensions.add(ext.toLowerAscii())
+            result.types = result.types * {etFile}
           of 's':
             if shortVal.len == 0:
               shortVal = getOptValue(processedArgs, i, "")
@@ -772,6 +810,7 @@ proc parseCli*(args: seq[string]): Config =
                    result.minSize >= 0 or result.maxSize >= 0 or
                    result.newerThan.isSome or result.olderThan.isSome or
                    result.containsText.len > 0 or result.containsRegex.len > 0 or
+                   result.extensions.len > 0 or
                    result.searchFunction.len > 0 or result.searchClass.len > 0 or
                    result.searchSymbol.len > 0
   
@@ -808,6 +847,10 @@ proc parseCli*(args: seq[string]): Config =
   if result.fuzzyMode and result.rankMode == rmNone:
     result.rankMode = rmScore
 
+  if result.print0 and result.outputMode != omPlain:
+    niceError("--print0 can only be used with plain output")
+    quit(2)
+
 proc applyParsedQuery*(cfg: var Config; pq: ParsedQuery) =
   if pq.patterns.len > 0:
     cfg.patterns = pq.patterns
@@ -823,12 +866,47 @@ proc applyParsedQuery*(cfg: var Config; pq: ParsedQuery) =
     cfg.types = pq.types
   if pq.containsText.len > 0:
     cfg.containsText = pq.containsText
+  if pq.containsRegex.len > 0:
+    cfg.containsRegex = pq.containsRegex
   if pq.extensions.len > 0:
     for ext in pq.extensions:
-      cfg.patterns.add("*" & ext)
-    cfg.matchMode = pq.matchMode
+      if ext notin cfg.extensions: cfg.extensions.add(ext.toLowerAscii())
+    cfg.types = cfg.types * {etFile}
   if pq.excludePatterns.len > 0:
     for ex in pq.excludePatterns:
       cfg.excludes.add("*" & ex & "*")
   if pq.inDirectory.len > 0:
     cfg.paths = @[pq.inDirectory]
+  if pq.modeExplicit:
+    cfg.matchMode = pq.matchMode
+    cfg.modeExplicit = true
+    cfg.fuzzyMode = pq.matchMode == mmFuzzy
+  cfg.pathMode = pq.pathMode
+  if pq.pathMode == pmFullPath: cfg.pathModeExplicit = true
+  if pq.minDepth > 0: cfg.minDepth = pq.minDepth
+  if pq.maxDepth >= 0: cfg.maxDepth = pq.maxDepth
+  if pq.limit > 0: cfg.limit = pq.limit
+  if pq.sortKey != skNone: cfg.sortKey = pq.sortKey
+  if pq.reverseSort: cfg.reverse = true
+  if pq.includeHidden: cfg.includeHidden = true
+  if pq.followSymlinks: cfg.followSymlinks = true
+  cfg.queryInterpretation = pq.interpretation
+  cfg.queryWarnings = pq.warnings
+
+proc printQueryPlan*(cfg: Config) =
+  stdout.writeLine("Natural-language query plan:")
+  if cfg.queryInterpretation.len == 0:
+    stdout.writeLine("  No natural-language clauses were recognized.")
+  else:
+    for item in cfg.queryInterpretation: stdout.writeLine("  - " & item)
+  if cfg.patterns.len > 0: stdout.writeLine("  name patterns: " & cfg.patterns.join(", "))
+  if cfg.extensions.len > 0: stdout.writeLine("  extensions: " & cfg.extensions.join(", "))
+  if cfg.paths.len > 0: stdout.writeLine("  roots: " & cfg.paths.join(", "))
+  if cfg.minSize >= 0: stdout.writeLine("  minimum size: " & $cfg.minSize & " bytes")
+  if cfg.maxSize >= 0: stdout.writeLine("  maximum size: " & $cfg.maxSize & " bytes")
+  if cfg.newerThan.isSome: stdout.writeLine("  modified after: " & $cfg.newerThan.get)
+  if cfg.olderThan.isSome: stdout.writeLine("  modified before: " & $cfg.olderThan.get)
+  if cfg.containsText.len > 0: stdout.writeLine("  content: " & cfg.containsText)
+  if cfg.excludes.len > 0: stdout.writeLine("  excludes: " & cfg.excludes.join(", "))
+  if cfg.limit > 0: stdout.writeLine("  limit: " & $cfg.limit)
+  for warning in cfg.queryWarnings: stderr.writeLine("fastfind: NLP warning: " & warning)

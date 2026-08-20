@@ -134,6 +134,27 @@ proc supportsColor*(mode: ColorMode = cmAuto): bool =
     except CatchableError:
       return false
 
+proc sanitizeTerminalText*(value: string): string =
+  ## Keep control bytes in filenames from taking over the terminal.
+  result = newStringOfCap(value.len)
+  const hex = "0123456789abcdef"
+  for c in value:
+    let n = ord(c)
+    if n < 32 or n == 127:
+      result.add("\\x")
+      result.add(hex[(n shr 4) and 0xf])
+      result.add(hex[n and 0xf])
+    else:
+      result.add(c)
+
+proc terminalText*(value: string; preserveBytes: bool = false): string =
+  if preserveBytes: return value
+  try:
+    if isatty(stdout): return sanitizeTerminalText(value)
+  except CatchableError:
+    discard
+  value
+
 proc initColor*(mode: ColorMode = cmAuto) =
   globalColorEnabled = supportsColor(mode)
 

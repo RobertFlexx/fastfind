@@ -20,6 +20,18 @@ type
     excludePatterns*: seq[string]
     inDirectory*: string
     matchMode*: MatchMode
+    modeExplicit*: bool
+    pathMode*: PathMode
+    minDepth*: int
+    maxDepth*: int
+    limit*: int
+    sortKey*: SortKey
+    reverseSort*: bool
+    includeHidden*: bool
+    followSymlinks*: bool
+    containsRegex*: string
+    interpretation*: seq[string]
+    warnings*: seq[string]
     humanDescription*: string
 
 const
@@ -310,9 +322,6 @@ proc isNaturalLanguageQuery*(query: string): bool =
 
   if score >= 1: return true
 
-  if ' ' in q and '*' notin q and '?' notin q and '(' notin q and '[' notin q:
-    if words.len >= 3: return true
-
   for item in CompoundCategories:
     let compound = item[0]
     if qlc.contains(compound): return true
@@ -375,7 +384,7 @@ proc buildHumanDescription(pq: ParsedQuery; originalQuery: string): string =
   if parts.len == 0: return originalQuery
   result = parts.join(" ")
 
-proc parseNaturalQuery*(query: string): ParsedQuery =
+proc parseNaturalQueryLegacy(query: string): ParsedQuery {.used.} =
   var q = ParsedQuery()
   q.minSize = -1
   q.maxSize = -1
@@ -711,4 +720,394 @@ proc parseNaturalQuery*(query: string): ParsedQuery =
     q.types = {etFile, etDir, etLink}
 
   q.humanDescription = buildHumanDescription(q, query)
+  result = q
+
+type QueryToken = object
+  raw: string
+  norm: string
+  quoted: bool
+
+proc tokenizeQuery(query: string): seq[QueryToken] =
+  ## Split on whitespace, but keep quoted phrases and the original path casing.
+  ## Quoted text may contain spaces and backslash escapes.
+  var current = newStringOfCap(32)
+  var quote = '\0'
+  var quoted = false
+  var escaped = false
+  template flush() =
+    if current.len == 0: return
+    let raw = current.strip(chars = {',', ';'})
+    if raw.len > 0:
+      result.add(QueryToken(raw: raw, norm: raw.toLowerAscii(), quoted: quoted))
+    current.setLen(0)
+    quoted = false
+  for c in query:
+    if escaped:
+      current.add(c)
+      escaped = false
+    elif c == '\\' and quote != '\0':
+      escaped = true
+    elif quote != '\0':
+      if c == quote:
+        quote = '\0'
+        quoted = true
+      else:
+        current.add(c)
+    elif c == '"' or c == '\'':
+      quote = c
+      quoted = true
+    elif c in Whitespace:
+      flush()
+    else:
+      current.add(c)
+  if escaped: current.add('\\')
+  flush()
+
+proc categoryExtensions(word: string): seq[string] =
+  for item in CompoundCategories:
+    if word == item[0]: return item[1]
+  case word
+  of "image", "images", "photo", "photos", "picture", "pictures", "pics": CategoryImages
+  of "video", "videos", "movie", "movies", "film", "films", "clips": CategoryVideos
+  of "audio", "music", "song", "songs", "sound", "podcast", "podcasts": CategoryAudio
+  of "document", "documents", "pdf", "pdfs", "ebook", "ebooks": CategoryDocs
+  of "text", "plaintext", "textfile", "textfiles": CategoryText
+  of "archive", "archives", "compressed", "zip", "zipped": CategoryArchives
+  of "code", "source", "scripts", "script", "programming": CategoryCode
+  of "config", "configs", "configuration", "settings": CategoryConfig
+  of "log", "logs", "logfile", "logfiles": CategoryLogs
+  of "spreadsheet", "spreadsheets", "excel", "sheets": CategorySheets
+  of "presentation", "presentations", "slides", "powerpoint": CategorySlides
+  of "devops", "infrastructure", "infra", "kubernetes", "k8s": CategoryDevops
+  of "database", "databases", "db": CategoryDatabase
+  of "font", "fonts", "typography": CategoryFonts
+  else: @[]
+
+proc languageExtensions(word: string): seq[string] =
+  var w = word
+  if w.endsWith("files") and w.len > 5: w.setLen(w.len - 5)
+  elif w.endsWith("code") and w.len > 4: w.setLen(w.len - 4)
+  for item in LangMap:
+    if w == item[0] or w == item[0] & "s": return item[1]
+  @[]
+
+proc cleanExtension(value: string): string =
+  result = value.strip(chars = {'.', '*', ',', ';', ':'}).toLowerAscii()
+  if result.len > 0: result = "." & result
+
+proc parseByteToken(tokens: seq[QueryToken]; i: var int): Option[int64] =
+  if i >= tokens.len: return none(int64)
+  var value = tokens[i].raw.strip(chars = {',', ';'})
+  var consumed = 1
+  while value.len > 0 and value[0] in {'>', '<', '=', '~'}: value = value[1..^1]
+  if value.len == 0: return none(int64)
+  if i + 1 < tokens.len and tokens[i + 1].norm in
+      ["b", "byte", "bytes", "kb", "kib", "mb", "mib", "gb", "gib", "tb", "tib"]:
+    value.add(tokens[i + 1].norm)
+    consumed = 2
+  try:
+    result = some(parseBytes(value))
+    i += consumed
+  except CatchableError:
+    result = none(int64)
+
+proc parseDurationTokens(tokens: seq[QueryToken]; i: var int): Option[Duration] =
+  if i >= tokens.len: return none(Duration)
+  let anchor = tokens[i].norm
+  case anchor
+  of "today", "tonight": inc i; return some(initDuration(days = 1))
+  of "yesterday": inc i; return some(initDuration(days = 2))
+  of "recent", "recently", "latest", "newest": inc i; return some(initDuration(days = 7))
+  of "week", "weekly": inc i; return some(initDuration(days = 7))
+  of "month", "monthly": inc i; return some(initDuration(days = 30))
+  of "year", "yearly": inc i; return some(initDuration(days = 365))
+  else: discard
+  try:
+    let n = parseInt(anchor)
+    if i + 1 >= tokens.len: return none(Duration)
+    let unit = tokens[i + 1].norm
+    i += 2
+    case unit
+    of "s", "sec", "secs", "second", "seconds": some(initDuration(seconds = n))
+    of "m", "min", "mins", "minute", "minutes": some(initDuration(minutes = n))
+    of "h", "hr", "hrs", "hour", "hours": some(initDuration(hours = n))
+    of "d", "day", "days": some(initDuration(days = n))
+    of "w", "wk", "wks", "week", "weeks": some(initDuration(days = n * 7))
+    of "mo", "month", "months": some(initDuration(days = n * 30))
+    of "y", "yr", "yrs", "year", "years": some(initDuration(days = n * 365))
+    else:
+      i -= 2
+      none(Duration)
+  except CatchableError:
+    try:
+      let d = parseDuration(tokens[i].raw)
+      inc i
+      some(d)
+    except CatchableError:
+      none(Duration)
+
+proc clauseBoundary(word: string): bool =
+  word in ["named", "called", "containing", "contains", "content", "under",
+    "inside", "located", "exclude", "excluding", "except", "without",
+    "larger", "bigger", "smaller", "older", "newer", "modified", "changed",
+    "updated", "sort", "order", "limit", "top", "depth", "hidden"]
+
+proc addInterpretation(q: var ParsedQuery; text: string) =
+  if text.len > 0 and text notin q.interpretation: q.interpretation.add(text)
+
+proc parseNaturalQuery*(query: string): ParsedQuery =
+  ## Turn a sentence into search filters. Quoted phrases, key:value filters,
+  ## and conversational wording are understood; unfamiliar words stay in the
+  ## name query instead of quietly disappearing.
+  var q = ParsedQuery(minSize: -1, maxSize: -1, newerThan: none(Time),
+    olderThan: none(Time), types: {}, matchMode: mmGlob,
+    pathMode: pmBaseName, minDepth: 0, maxDepth: -1,
+    sortKey: skNone)
+  let tokens = tokenizeQuery(query)
+  var i = 0
+  var unknown: seq[string] = @[]
+
+  template addExts(exts: seq[string]; label: string) =
+    if exts.len > 0:
+      q.addExtensions(exts)
+      q.addInterpretation(label)
+
+  while i < tokens.len:
+    let token = tokens[i]
+    let word = token.norm.strip(chars = {'.', ',', ';', '!', '?'})
+
+    # Short key:value filters can be mixed into an ordinary sentence.
+    let colon = token.raw.find(':')
+    if colon > 0 and colon + 1 < token.raw.len:
+      let key = token.raw[0..<colon].toLowerAscii()
+      let value = token.raw[colon + 1..^1]
+      case key
+      of "ext", "extension", "format":
+        for part in value.split(','):
+          let ext = cleanExtension(part)
+          if ext.len > 1: q.addExtensions([ext])
+        q.addInterpretation("extension filter")
+      of "name", "named":
+        var pat = value
+        if '*' notin pat and '?' notin pat: pat = "*" & pat & "*"
+        q.patterns.add(pat); q.addInterpretation("name " & value)
+      of "contains", "content", "text":
+        q.containsText = value; q.addInterpretation("content phrase")
+      of "regex", "content-re":
+        q.containsRegex = value; q.addInterpretation("content regex")
+      of "in", "under", "path":
+        q.inDirectory = value; q.addInterpretation("under " & value)
+      of "exclude", "without":
+        q.excludePatterns.add(value); q.addInterpretation("exclude " & value)
+      of "limit", "top":
+        try: q.limit = max(0, parseInt(value))
+        except CatchableError: q.warnings.add("invalid limit: " & value)
+      of "depth":
+        try: q.maxDepth = max(0, parseInt(value))
+        except CatchableError: q.warnings.add("invalid depth: " & value)
+      else:
+        unknown.add(token.raw)
+      inc i
+      continue
+
+    if word in TypeFile: q.types.incl(etFile); inc i; continue
+    if word in TypeDir: q.types.incl(etDir); inc i; continue
+    if word in TypeLink: q.types.incl(etLink); inc i; continue
+
+    let category = categoryExtensions(word)
+    if category.len > 0:
+      addExts(category, word)
+      inc i
+      continue
+    let language = languageExtensions(word)
+    if language.len > 0:
+      addExts(language, word & " source")
+      inc i
+      continue
+
+    if word in ["extension", "extensions", "ext", "format", "formats"] and i + 1 < tokens.len:
+      inc i
+      for part in tokens[i].raw.split(','):
+        let ext = cleanExtension(part)
+        if ext.len > 1: q.addExtensions([ext])
+      q.addInterpretation("extension filter")
+      inc i
+      continue
+    if (token.raw.startsWith("*.") or token.raw.startsWith(".")) and token.raw.len > 2:
+      q.addExtensions([cleanExtension(token.raw)])
+      inc i
+      continue
+
+    if word in ["named", "called", "filename", "name"] and i + 1 < tokens.len:
+      inc i
+      var pat = tokens[i].raw
+      if '*' notin pat and '?' notin pat: pat = "*" & pat & "*"
+      q.patterns.add(pat)
+      q.addInterpretation("name " & tokens[i].raw)
+      inc i
+      continue
+
+    if word in ["containing", "contains", "content", "text", "having"] and i + 1 < tokens.len:
+      inc i
+      var parts: seq[string] = @[]
+      if tokens[i].quoted:
+        parts.add(tokens[i].raw); inc i
+      else:
+        while i < tokens.len and not clauseBoundary(tokens[i].norm):
+          if tokens[i].norm notin ["the", "a", "an", "string", "phrase"]:
+            parts.add(tokens[i].raw)
+          inc i
+      q.containsText = parts.join(" ")
+      if q.containsText.len > 0: q.addInterpretation("content “" & q.containsText & "”")
+      continue
+
+    if word in ["under", "inside", "located", "within"] and i + 1 < tokens.len:
+      if word == "within" and i + 1 < tokens.len and
+          (tokens[i + 1].norm[0] in {'0'..'9'}): discard
+      else:
+        inc i
+        if tokens[i].norm == "the" and i + 1 < tokens.len: inc i
+        q.inDirectory = tokens[i].raw
+        q.addInterpretation("under " & q.inDirectory)
+        inc i
+        if i < tokens.len and tokens[i].norm in ["folder", "directory", "dir"]: inc i
+        continue
+    if word == "in" and i + 1 < tokens.len and
+        tokens[i + 1].norm notin ["the", "last", "past", "this"]:
+      inc i
+      q.inDirectory = tokens[i].raw
+      q.addInterpretation("under " & q.inDirectory)
+      inc i
+      continue
+
+    if word in ["exclude", "excluding", "except", "without", "ignore", "skip", "not"] and i + 1 < tokens.len:
+      inc i
+      if tokens[i].norm in ["named", "files", "file", "folders", "folder"] and i + 1 < tokens.len: inc i
+      q.excludePatterns.add(tokens[i].raw)
+      q.addInterpretation("exclude " & tokens[i].raw)
+      inc i
+      continue
+    if token.raw.startsWith("!") and token.raw.len > 1:
+      q.excludePatterns.add(token.raw[1..^1]); inc i; continue
+
+    if token.raw.len > 1 and (token.raw[0] in {'>', '<', '=', '~'}):
+      var sizeIdx = i
+      let size = parseByteToken(tokens, sizeIdx)
+      if size.isSome:
+        if token.raw.startsWith(">="): q.minSize = size.get
+        elif token.raw.startsWith(">"): q.minSize = size.get + 1
+        elif token.raw.startsWith("<="): q.maxSize = size.get
+        elif token.raw.startsWith("<"): q.maxSize = max(0'i64, size.get - 1)
+        else: q.minSize = size.get; q.maxSize = size.get
+        i = sizeIdx
+        q.addInterpretation("size filter")
+        continue
+
+    if word in ["larger", "bigger", "greater", "over", "above", "more",
+        "smaller", "less", "under", "below", "atleast", "atmost", "around",
+        "about", "exactly", "between", "size", "at"]:
+      var op = word
+      inc i
+      if op == "at" and i < tokens.len:
+        if tokens[i].norm in ["least", "minimum"]: op = "atleast"; inc i
+        elif tokens[i].norm in ["most", "maximum"]: op = "atmost"; inc i
+      if i < tokens.len and tokens[i].norm in ["than", "of", "is"]: inc i
+      if op == "atleast" or op == "atmost": discard
+      elif op == "at" and i < tokens.len: discard
+      if op == "between":
+        let lo = parseByteToken(tokens, i)
+        if i < tokens.len and tokens[i].norm in ["and", "to", "through"]: inc i
+        let hi = parseByteToken(tokens, i)
+        if lo.isSome: q.minSize = lo.get
+        if hi.isSome: q.maxSize = hi.get
+      else:
+        let size = parseByteToken(tokens, i)
+        if size.isSome:
+          if op in ["smaller", "less", "under", "below", "atmost"]: q.maxSize = size.get
+          elif op in ["around", "about"]:
+            q.minSize = max(0'i64, size.get - size.get div 10)
+            q.maxSize = size.get + size.get div 10
+          elif op == "exactly": q.minSize = size.get; q.maxSize = size.get
+          else: q.minSize = size.get
+        else: q.warnings.add("size clause had no valid size")
+      q.addInterpretation("size filter")
+      continue
+    if word in ["empty", "zero-byte", "zerobytes"]:
+      q.minSize = 0; q.maxSize = 0; q.types.incl(etFile); inc i; continue
+
+    if word in ["modified", "changed", "updated", "newer", "recent", "recently",
+        "latest", "newest", "older", "before", "after", "within", "last", "past",
+        "today", "yesterday"]:
+      let older = word in ["older", "before"]
+      inc i
+      while i < tokens.len and tokens[i].norm in ["in", "the", "last", "past", "within", "than", "ago"]: inc i
+      if word in ["today", "yesterday", "recent", "recently", "latest", "newest"]: dec i
+      var absoluteTime = none(Time)
+      if i < tokens.len:
+        try: absoluteTime = maybeTime(tokens[i].raw)
+        except CatchableError: discard
+      if absoluteTime.isSome:
+        if older: q.olderThan = absoluteTime else: q.newerThan = absoluteTime
+        inc i
+        q.addInterpretation(if older: "modified before date" else: "modified after date")
+        continue
+      let duration = parseDurationTokens(tokens, i)
+      if duration.isSome:
+        let threshold = getTime() - duration.get
+        if older: q.olderThan = some(threshold) else: q.newerThan = some(threshold)
+        q.addInterpretation(if older: "older than interval" else: "recent interval")
+      else:
+        q.warnings.add("time clause had no valid interval")
+      continue
+
+    if word in ["sort", "order", "ordered"]:
+      inc i
+      if i < tokens.len and tokens[i].norm == "by": inc i
+      if i < tokens.len:
+        case tokens[i].norm
+        of "newest", "latest", "recent", "time", "modified": q.sortKey = skTime; q.reverseSort = true
+        of "oldest": q.sortKey = skTime
+        of "largest", "biggest", "size": q.sortKey = skSize; q.reverseSort = true
+        of "smallest": q.sortKey = skSize
+        of "name": q.sortKey = skName
+        of "path": q.sortKey = skPath
+        else: q.warnings.add("unknown sort: " & tokens[i].raw)
+        inc i
+      continue
+    if word in ["top", "limit", "first"] and i + 1 < tokens.len:
+      try:
+        q.limit = max(0, parseInt(tokens[i + 1].norm)); i += 2
+      except CatchableError:
+        q.warnings.add("invalid result limit"); inc i
+      continue
+    if word in ["depth", "deep"] and i + 1 < tokens.len:
+      try: q.maxDepth = max(0, parseInt(tokens[i + 1].norm)); i += 2
+      except CatchableError: q.warnings.add("invalid depth"); inc i
+      continue
+
+    if word in ["hidden", "dotfiles"]: q.includeHidden = true; inc i; continue
+    if word in ["follow-links", "followsymlinks", "dereference"]: q.followSymlinks = true; inc i; continue
+    if word == "fuzzy": q.matchMode = mmFuzzy; q.modeExplicit = true; inc i; continue
+    if word in ["regex", "regular-expression"]: q.matchMode = mmRegex; q.modeExplicit = true; inc i; continue
+    if word in ["exact", "literally", "literal"]: q.matchMode = mmFixed; q.modeExplicit = true; inc i; continue
+    if word in ["full-path", "pathnames", "paths"]: q.pathMode = pmFullPath; inc i; continue
+
+    if word in FillerWords or word in ActionWords or word in ModifierWords or
+        word in ["file", "files", "folder", "folders", "directory", "directories"]:
+      inc i
+      continue
+    unknown.add(token.raw)
+    inc i
+
+  if q.types == {}: q.types = {etFile, etDir, etLink}
+  if q.extensions.len == 0 and q.patterns.len == 0 and unknown.len > 0:
+    var pat = unknown.join(" ")
+    if '*' notin pat and '?' notin pat: pat = "*" & pat & "*"
+    q.patterns.add(pat)
+    q.addInterpretation("name " & unknown.join(" "))
+  elif unknown.len > 0:
+    q.warnings.add("uninterpreted words: " & unknown.join(" "))
+  q.humanDescription = buildHumanDescription(q, query)
+  if q.interpretation.len > 0:
+    q.humanDescription &= " [" & q.interpretation.join("; ") & "]"
   result = q

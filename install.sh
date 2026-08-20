@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
-# this script uses python3 as well, install python3 if not already.
+# Python 3 is used to parse GitHub release metadata.
 REPO_DEFAULT="RobertFlexx/fastfind"
 DEFAULT_SYSTEM_PREFIX="/usr/local"
 DEFAULT_USER_PREFIX="${HOME}/.local"
@@ -106,6 +106,7 @@ on_error() {
 
 cleanup() {
   [ -n "$WORKDIR" ] && [ -d "$WORKDIR" ] && rm -rf "$WORKDIR"
+  return 0
 }
 
 trap 'on_error $? $LINENO "$BASH_COMMAND"' ERR
@@ -325,14 +326,15 @@ lookup_asset_sha256() {
   [ -n "$RELEASE_JSON" ] || return 0
   has_cmd python3 || return 0
 
-  printf "%s" "$RELEASE_JSON" | python3 - "$url" <<'PY'
+  RELEASE_JSON_PAYLOAD="$RELEASE_JSON" python3 - "$url" <<'PY'
 import json
+import os
 import sys
 
 want = sys.argv[1]
 
 try:
-    release = json.load(sys.stdin)
+    release = json.loads(os.environ.get("RELEASE_JSON_PAYLOAD", ""))
 except Exception:
     raise SystemExit(0)
 
@@ -369,7 +371,6 @@ extract_tag_name() {
 extract_browser_download_urls() {
   printf "%s" "$1" | grep -oE 'https://github\.com/[^"]+/releases/download/[^"]+' | sort -u
 }
-# below is bullshit
 arch_token_matches() {
   local base="$1"
   case "$ARCH" in
@@ -686,33 +687,31 @@ download_binary() {
     SELECTED_ASSET_URL="$url"
     SELECTED_ASSET_SHA256="$(lookup_asset_sha256 "$url" || true)"
 
-    if [ -n "$SELECTED_ASSET_SHA256" ]; then
-      actual_sha="$(file_sha256_hex "$TMP_BIN")"
-      if [ "$actual_sha" != "$SELECTED_ASSET_SHA256" ]; then
-        warn "SHA-256 mismatch for ${url##*/}; expected ${SELECTED_ASSET_SHA256}, got ${actual_sha}"
-        rm -f "$TMP_BIN"
-        SELECTED_ASSET_URL=""
-        SELECTED_ASSET_SHA256=""
-        continue
-      fi
-      verified=1
+    if [ -z "$SELECTED_ASSET_SHA256" ]; then
+      warn "refusing unverified release asset ${url##*/}: no SHA-256 digest in release metadata"
+      rm -f "$TMP_BIN"
+      SELECTED_ASSET_URL=""
+      continue
     fi
+    actual_sha="$(file_sha256_hex "$TMP_BIN")"
+    if [ "$actual_sha" != "$SELECTED_ASSET_SHA256" ]; then
+      warn "SHA-256 mismatch for ${url##*/}; expected ${SELECTED_ASSET_SHA256}, got ${actual_sha}"
+      rm -f "$TMP_BIN"
+      SELECTED_ASSET_URL=""
+      SELECTED_ASSET_SHA256=""
+      continue
+    fi
+    verified=1
 
     chmod 755 "$TMP_BIN"
-    if [ "$verified" -eq 1 ]; then
-      okay "binary downloaded and SHA-256 verified"
-    else
-      warn "binary downloaded, but no SHA-256 digest was available in release metadata"
-      okay "binary downloaded"
-    fi
+    okay "binary downloaded and SHA-256 verified"
     return 0
   done <<< "$(list_binary_download_urls_ordered)"
 
   if [ "$tried" -eq 0 ]; then
     die "no candidate download URLs were generated for ${PLATFORM_LABEL}. See $(releases_page_url)"
   fi
-
-  die "failed to download a matching and valid release asset for ${PLATFORM_LABEL}. See $(releases_page_url)"
+  die "no matching release asset passed mandatory SHA-256 verification. See $(releases_page_url)"
 }
 
 download_manpage() {
@@ -721,11 +720,9 @@ download_manpage() {
   local url=""
   local refs=""
 
-  if [ "$USE_LATEST_REDIRECT" -eq 1 ]; then
-    refs="main"
-  else
-    refs="${VERSION} main"
-  fi
+  # Documentation must come from the same immutable release as the binary.
+  [ "$VERSION" != "latest" ] || return 0
+  refs="${VERSION}"
 
   step "downloading manpage"
 

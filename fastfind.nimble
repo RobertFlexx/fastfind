@@ -18,27 +18,28 @@ task dev, "Build debug binary":
   exec "nim c -d:debug -o:bin/fastfind src/ff.nim"
 
 task release, "Build optimized release binary":
-  exec "nim c -d:release --opt:speed -o:bin/fastfind src/ff.nim"
+  exec "nim c --mm:orc --threads:on -d:release --opt:speed -o:bin/fastfind src/ff.nim"
 
 task release_fast, "Build high-optimization release binary":
-  exec "nim c -d:release -d:danger --opt:speed --passC:-flto --passL:-flto -o:bin/fastfind src/ff.nim"
+  exec "nim c --mm:orc --threads:on -d:release --opt:speed --passC:-flto --passL:-flto -o:bin/fastfind src/ff.nim"
 
 task release_threaded, "Build release binary with threading":
-  exec "nim c -d:release --opt:speed --threads:on -o:bin/fastfind src/ff.nim"
+  exec "nim c --mm:orc --threads:on -d:release --opt:speed -o:bin/fastfind src/ff.nim"
 
 task release_full, "Build fully optimized threaded release binary":
-  exec "nim c -d:release -d:danger --opt:speed --threads:on --passC:-flto --passL:-flto -o:bin/fastfind src/ff.nim"
+  exec "nim c --mm:orc --threads:on -d:release --opt:speed --passC:-flto --passL:-flto -o:bin/fastfind src/ff.nim"
 
 task check, "Compile check":
   exec "nim c src/ff.nim"
 
 task test, "Run CLI regression tests":
-  exec "nim c -d:release --opt:speed -o:/tmp/opencode/fastfind-under-test src/ff.nim"
-  exec "bash tests/cli_regression.sh /tmp/opencode/fastfind-under-test"
+  exec "nim c --mm:orc --threads:on -d:release --opt:speed -o:/tmp/fastfind-under-test src/ff.nim"
+  exec "nim c -r --mm:orc --threads:on tests/test_nlp.nim"
+  exec "bash tests/cli_regression.sh /tmp/fastfind-under-test"
 
 task clean, "Remove build artifacts":
   exec "rm -rf bin/fastfind nimcache"
 
 task install, "Build release binary and install to /usr/local/bin/ff":
-  exec "nim c -d:release --opt:speed -o:bin/fastfind src/ff.nim"
+  exec "nim c --mm:orc --threads:on -d:release --opt:speed -o:bin/fastfind src/ff.nim"
   exec "sudo cp bin/fastfind /usr/local/bin/ff"

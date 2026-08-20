@@ -1,5 +1,5 @@
 # src/ff/matchers.nim
-import std/[strutils, re]
+import std/[os, strutils, re]
 import fuzzy_match
 
 type
@@ -32,10 +32,14 @@ type
     patterns*: seq[string]
     compiled*: seq[Regex]
 
+  GitignoreRule = object
+    regex: Regex
+    negated: bool
+
   Gitignore* = object
     ignoreCase*: bool
-    exclude*: seq[Regex]
-    allow*: seq[Regex]
+    root*: string
+    rules: seq[GitignoreRule]
 
 proc escapeRe(s: string): string =
   result = newStringOfCap(s.len + 8)
@@ -66,6 +70,62 @@ proc globToRegex*(glob: string): string =
     else:
       result.add(escapeRe($c))
     inc i
+  result.add('$')
+
+proc gitGlobBody(glob: string): string =
+  ## Turn gitignore wildcards into regex. A single star stops at `/`, while
+  ## `**/` can cover any number of directories (including none).
+  result = newStringOfCap(glob.len * 2 + 8)
+  var i = 0
+  while i < glob.len:
+    case glob[i]
+    of '*':
+      if i + 1 < glob.len and glob[i + 1] == '*':
+        inc i
+        if i + 1 < glob.len and glob[i + 1] == '/':
+          inc i
+          result.add("(?:.*/)?")
+        else:
+          result.add(".*")
+      else:
+        result.add("[^/]*")
+    of '?':
+      result.add("[^/]")
+    of '[':
+      var j = i + 1
+      if j < glob.len and glob[j] in {'!', '^'}: inc j
+      if j < glob.len and glob[j] == ']': inc j
+      while j < glob.len and glob[j] != ']': inc j
+      if j < glob.len:
+        result.add('[')
+        var start = i + 1
+        if start < j and glob[start] == '!':
+          result.add('^')
+          inc start
+        result.add(glob[start..<j])
+        result.add(']')
+        i = j
+      else:
+        result.add("\\[")
+    of '\\':
+      if i + 1 < glob.len:
+        inc i
+        result.add(escapeRe($glob[i]))
+      else:
+        result.add("\\\\")
+    else:
+      result.add(escapeRe($glob[i]))
+    inc i
+
+proc gitPatternToRegex(pattern: string; directoryOnly: bool): string =
+  var p = pattern
+  let anchored = p.startsWith("/")
+  if anchored: p = p[1..^1]
+  let hasSlash = '/' in p
+  result = if anchored or hasSlash: "^" else: "(?:^|.*/)"
+  result.add(gitGlobBody(p))
+  if directoryOnly:
+    result.add("(?:/.*)?")
   result.add('$')
 
 proc hasAnyWildcard(s: string): bool {.inline.} =
@@ -418,39 +478,65 @@ proc isExcluded*(e: Excluder; relPath: string): bool {.inline.} =
     if relPath.match(rx): return true
   false
 
-proc compileGitignore*(gi: var Gitignore; lines: seq[string]) =
-  gi.exclude.setLen(0)
-  gi.allow.setLen(0)
+proc appendGitignore(gi: var Gitignore; lines: seq[string]; scope: string) =
   for raw in lines:
-    var s = raw.strip()
+    var s = raw.strip(leading = false, trailing = true)
     if s.len == 0 or s[0] == '#': continue
-    let h = s.find('#')
-    if h > 0: s = s[0..<h].strip()
+    if s.startsWith("\\#"): s = s[1..^1]
     if s.len == 0: continue
 
     var neg = false
-    if s[0] == '!':
+    if s.startsWith("\\!"):
+      s = s[1..^1]
+    elif s[0] == '!':
       neg = true
-      s = s[1..^1].strip()
+      s = s[1..^1]
       if s.len == 0: continue
 
-    if s[^1] == '/': s &= "**"
-    if s[0] == '/': s = s[1..^1]
-    if not s.contains('/') and not s.startsWith("**/"): s = "**/" & s
-
-    let rxStr = globToRegex(s)
+    let directoryOnly = s.endsWith("/")
+    if directoryOnly: s.setLen(s.len - 1)
+    if s.len == 0: continue
+    if scope.len > 0:
+      let anchored = s.startsWith("/")
+      if anchored: s = s[1..^1]
+      if anchored or '/' in s:
+        s = scope & "/" & s
+      else:
+        s = scope & "/**/" & s
+    let rxStr = gitPatternToRegex(s, directoryOnly)
     let flags = if gi.ignoreCase: {reIgnoreCase} else: {}
-    let rx = re(rxStr, flags)
-    if neg: gi.allow.add(rx) else: gi.exclude.add(rx)
+    gi.rules.add(GitignoreRule(regex: re(rxStr, flags), negated: neg))
+
+proc compileGitignore*(gi: var Gitignore; lines: seq[string]) =
+  gi.rules.setLen(0)
+  gi.appendGitignore(lines, "")
+
+proc extendGitignore*(gi: var Gitignore; lines: seq[string]; scope: string) =
+  gi.appendGitignore(lines, scope.strip(chars = {'/', '\\'}))
+
+proc derivedGitignore*(parent: Gitignore; lines: seq[string]; scope: string): Gitignore =
+  ## Copy the rule list before adding local rules so sibling directories don't
+  ## accidentally share changes. The compiled regexes themselves are safe to reuse.
+  result.ignoreCase = parent.ignoreCase
+  result.root = parent.root
+  result.rules = newSeqOfCap[GitignoreRule](parent.rules.len + lines.len)
+  result.rules.add(parent.rules)
+  result.appendGitignore(lines, scope.strip(chars = {'/', '\\'}))
 
 proc isGitIgnored*(gi: Gitignore; relPath: string): bool {.inline.} =
-  if gi.exclude.len == 0: return false
-  var excluded = false
-  for rx in gi.exclude:
-    if relPath.match(rx):
-      excluded = true
-      break
-  if not excluded: return false
-  for rx in gi.allow:
-    if relPath.match(rx): return false
-  true
+  var target = relPath
+  if gi.root.len > 0 and relPath.isAbsolute:
+    try: target = relativePath(relPath, gi.root)
+    except CatchableError: discard
+  proc evaluate(path: string): bool =
+    result = false
+    for rule in gi.rules:
+      if path.match(rule.regex): result = not rule.negated
+
+  # Git can't bring an entry back when one of its parent directories is still
+  # ignored. Checking parents here also keeps direct matcher calls consistent.
+  var slash = target.find('/')
+  while slash >= 0:
+    if evaluate(target[0..<slash]): return true
+    slash = target.find('/', slash + 1)
+  evaluate(target)

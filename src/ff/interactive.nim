@@ -75,6 +75,7 @@ type
     typeFilter: string
     confirmAction: string
     confirmTarget: string
+    pendingDelete: seq[string]
     yankPath: string
     lastJump: char
 
@@ -534,6 +535,8 @@ proc drawBox(x, y, w, h: int; title: string = "") =
   stdout.write("└" & repeat("─", w - 2) & "┘")
   stdout.write(ColorReset)
 
+proc safeDisplay(value: string): string
+
 proc drawHeader(state: TUIState) =
   gotoXY(1, 1)
   stdout.write(ColorHeader)
@@ -542,7 +545,7 @@ proc drawHeader(state: TUIState) =
   if state.globalMode:
     modeIndicator = " 🌍 GLOBAL "
   
-  let cwdDisplay = truncateLeft(state.cwd, state.width - 30)
+  let cwdDisplay = truncateLeft(safeDisplay(state.cwd), state.width - 30)
   
   let modeStr = case state.mode
     of modeBrowse: "BROWSE"
@@ -584,6 +587,13 @@ proc highlightMatch(name: string; query: string; baseColor: string): string =
   
   result = baseColor & result
 
+proc safeDisplay(value: string): string =
+  ## Clean filenames before putting them on screen.
+  result = newStringOfCap(value.len)
+  for c in value:
+    if c >= ' ' and c != '\x7f': result.add(c)
+    else: result.add('?')
+
 proc drawEntry(state: TUIState; entry: FileEntry; y: int; width: int; isSelected: bool; isCursor: bool) =
   gotoXY(1, y)
   clearLn()
@@ -617,7 +627,8 @@ proc drawEntry(state: TUIState; entry: FileEntry; y: int; width: int; isSelected
   
   let detailsWidth = if state.showDetails: 22 else: 0
   let nameWidth = width - 5 - icon.len - detailsWidth
-  let name = truncateRight(entry.name, nameWidth)
+  let displayName = safeDisplay(entry.name)
+  let name = truncateRight(displayName, nameWidth)
   
   if state.query.len > 0 and entry.name != "..":
     stdout.write(highlightMatch(padRight(name, nameWidth), state.query, baseColor))
@@ -686,12 +697,12 @@ proc drawPreview(state: TUIState) =
   
   gotoXY(px + 2, 2)
   stdout.write(ColorBold)
-  stdout.write(truncateRight(entry.name, pw - 4))
+  stdout.write(truncateRight(safeDisplay(entry.name), pw - 4))
   stdout.write(ColorReset)
   
   gotoXY(px + 2, 3)
   stdout.write(ColorDim)
-  stdout.write(truncateRight(entry.path, pw - 4))
+  stdout.write(truncateRight(safeDisplay(entry.path), pw - 4))
   stdout.write(ColorReset)
   
   if entry.kind == etDir:
@@ -724,7 +735,7 @@ proc drawPreview(state: TUIState) =
     try:
       let target = expandSymlink(entry.path)
       gotoXY(px + 2, 6)
-      stdout.write(ColorPreview & "-> " & truncateRight(target, pw - 7) & ColorReset)
+      stdout.write(ColorPreview & "-> " & truncateRight(safeDisplay(target), pw - 7) & ColorReset)
     except CatchableError:
       discard
     return
@@ -1088,6 +1099,27 @@ proc yankPath(state: var TUIState) =
     state.yankPath = entry.path
     state.setMessage("Yanked: " & entry.path, "success")
 
+proc performPendingDelete(state: var TUIState) =
+  let requested = state.pendingDelete.len
+  var removed = 0
+  for path in state.pendingDelete:
+    try:
+      # This can remove a file or symlink, but it never deletes a directory.
+      if dirExists(path) and not symlinkExists(path):
+        state.setMessage("Refusing recursive directory deletion: " & safeDisplay(path), "error")
+        continue
+      removeFile(path)
+      inc removed
+    except CatchableError:
+      state.setMessage("Failed to remove: " & safeDisplay(path), "error")
+  state.pendingDelete.setLen(0)
+  state.selectedPaths.setLen(0)
+  state.confirmAction = ""
+  state.confirmTarget = ""
+  loadDirectory(state)
+  if removed == requested:
+    state.setMessage("Removed " & $removed & " file(s)", "success")
+
 proc executeCommand(state: var TUIState; cmd: string) =
   let parts = cmd.strip().split(' ', maxsplit = 1)
   if parts.len == 0:
@@ -1144,27 +1176,20 @@ proc executeCommand(state: var TUIState; cmd: string) =
     else:
       state.setMessage("Usage: exec <command> (use {} for path)", "warning")
   of "rm", "delete":
+    state.pendingDelete.setLen(0)
     if state.selectedPaths.len > 0:
-      for path in state.selectedPaths:
-        try:
-          removeFile(path)
-          state.selectedPaths.delete(state.selectedPaths.find(path))
-        except CatchableError:
-          state.setMessage("Failed to remove: " & path, "error")
-          return
-      state.setMessage("Removed " & $state.selectedPaths.len & " file(s)", "success")
-      loadDirectory(state)
+      state.pendingDelete = state.selectedPaths
     else:
       let entry = currentEntry(state)
       if entry.name.len > 0 and entry.name != ".." and entry.kind == etFile:
-        try:
-          removeFile(entry.path)
-          state.setMessage("Removed: " & entry.name, "success")
-          loadDirectory(state)
-        except CatchableError:
-          state.setMessage("Failed to remove: " & entry.name, "error")
+        state.pendingDelete = @[entry.path]
       else:
         state.setMessage("No file selected", "warning")
+        return
+    state.confirmAction = "Delete permanently"
+    state.confirmTarget = if state.pendingDelete.len == 1:
+      safeDisplay(state.pendingDelete[0]) else: $state.pendingDelete.len & " selected files"
+    state.mode = modeConfirm
   else:
     state.setMessage("Unknown command: " & parts[0], "error")
 
@@ -1258,18 +1283,28 @@ proc runInteractive*(cfg: Config) =
   loadDirectory(state)
   
   var showingBookmarks = false
+  var dirty = true
+  var lastWidth = 0
+  var lastHeight = 0
   
   while state.running:
     state.width = terminalWidth()
     state.height = terminalHeight()
-    
-    render(state)
+    if state.width != lastWidth or state.height != lastHeight:
+      lastWidth = state.width
+      lastHeight = state.height
+      dirty = true
+
+    if dirty:
+      render(state)
+      dirty = false
     
     if showingBookmarks:
       drawBookmarks(state)
       stdout.flushFile()
     
     let key = readKey(stdinFd)
+    if key.kind != "none": dirty = true
     
     if showingBookmarks:
       case key.kind
@@ -1285,6 +1320,7 @@ proc runInteractive*(cfg: Config) =
           showingBookmarks = false
       else:
         discard
+      if key.kind != "none": dirty = true
       continue
     
     case state.mode
@@ -1569,7 +1605,7 @@ proc runInteractive*(cfg: Config) =
       of "enter":
         executeCommand(state, state.commandLine)
         state.commandLine = ""
-        state.mode = modeBrowse
+        if state.mode == modeCommand: state.mode = modeBrowse
       of "escape":
         state.commandLine = ""
         state.mode = modeBrowse
@@ -1604,12 +1640,15 @@ proc runInteractive*(cfg: Config) =
       case key.kind
       of "char":
         if key.ch == 'y' or key.ch == 'Y':
+          performPendingDelete(state)
           state.mode = modeBrowse
         elif key.ch == 'n' or key.ch == 'N':
+          state.pendingDelete.setLen(0)
           state.confirmAction = ""
           state.confirmTarget = ""
           state.mode = modeBrowse
       of "escape":
+        state.pendingDelete.setLen(0)
         state.confirmAction = ""
         state.confirmTarget = ""
         state.mode = modeBrowse
