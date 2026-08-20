@@ -1,0 +1,311 @@
+name: Release binaries
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing GitHub release tag to rebuild and update
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+
+env:
+  NIM_VERSION: 2.2.10
+  RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+
+jobs:
+  build:
+    name: Build ${{ matrix.label }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Linux x86_64
+            runner: ubuntu-22.04
+            platform: linux-glibc-amd64
+            family: unix
+            os: linux
+            binary: ff-linux-glibc-amd64
+            archive: fastfind-linux-glibc-amd64.tar.gz
+          - label: Linux ARM64
+            runner: ubuntu-22.04-arm
+            platform: linux-glibc-arm64
+            family: unix
+            os: linux
+            binary: ff-linux-glibc-arm64
+            archive: fastfind-linux-glibc-arm64.tar.gz
+          - label: macOS x86_64
+            runner: macos-15-intel
+            platform: darwin-amd64
+            family: unix
+            os: macos
+            binary: ff-darwin-amd64
+            archive: fastfind-darwin-amd64.tar.gz
+          - label: macOS ARM64
+            runner: macos-15
+            platform: darwin-arm64
+            family: unix
+            os: macos
+            binary: ff-darwin-arm64
+            archive: fastfind-darwin-arm64.tar.gz
+          - label: Windows x86_64
+            runner: windows-2022
+            platform: windows-amd64
+            family: windows
+            os: windows
+            binary: ff-windows-amd64.exe
+            archive: fastfind-windows-amd64.zip
+
+    steps:
+      - name: Check out the released tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          persist-credentials: false
+
+      - name: Set up Nim
+        uses: jiro4989/setup-nim-action@cb1fc1270b117457dd0d9f610ec981fad3369cec # v2
+        with:
+          nim-version: ${{ env.NIM_VERSION }}
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install PCRE development files (Linux)
+        if: matrix.os == 'linux'
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends libpcre3-dev
+
+      - name: Install PCRE development files (macOS)
+        if: matrix.os == 'macos'
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          brew install pcre
+
+      - name: Install PCRE development files (Windows)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & 'C:\msys64\usr\bin\bash.exe' -lc 'pacman -Sy --noconfirm --needed mingw-w64-x86_64-pcre'
+          if ($LASTEXITCODE -ne 0) {
+            throw "MSYS2 failed to install PCRE"
+          }
+
+      - name: Build and test the Unix binary
+        if: matrix.family == 'unix'
+        shell: bash
+        env:
+          ASSET_NAME: ${{ matrix.binary }}
+        run: |
+          set -Eeuo pipefail
+          mkdir -p dist
+
+          if [[ "${{ matrix.os }}" == "linux" ]]; then
+            multiarch="$(dpkg-architecture -qDEB_HOST_MULTIARCH)"
+            pcre_prefix="/usr"
+            pcre_archive="/usr/lib/${multiarch}/libpcre.a"
+          else
+            export MACOSX_DEPLOYMENT_TARGET=13.0
+            pcre_prefix="$(brew --prefix pcre)"
+            pcre_archive="${pcre_prefix}/lib/libpcre.a"
+          fi
+
+          test -f "${pcre_archive}"
+          nim c \
+            --mm:orc \
+            --threads:on \
+            -d:release \
+            -d:usePcreHeader \
+            --opt:speed \
+            "--passC:-I${pcre_prefix}/include" \
+            "--passL:${pcre_archive}" \
+            "-o:dist/${ASSET_NAME}" \
+            src/ff.nim
+
+          if [[ "${{ matrix.os }}" == "macos" ]]; then
+            strip -x "dist/${ASSET_NAME}"
+          else
+            strip "dist/${ASSET_NAME}"
+          fi
+          chmod 0755 "dist/${ASSET_NAME}"
+
+          "dist/${ASSET_NAME}" --version
+          "dist/${ASSET_NAME}" --contains-re 'import std' --fixed ff.nim src | grep -q 'ff.nim'
+          file "dist/${ASSET_NAME}"
+
+          if [[ "${{ matrix.os }}" == "macos" ]]; then
+            if otool -L "dist/${ASSET_NAME}" | grep -Eiq 'libpcre'; then
+              echo "PCRE was linked dynamically" >&2
+              exit 1
+            fi
+          elif ldd "dist/${ASSET_NAME}" | grep -Eiq 'libpcre'; then
+            echo "PCRE was linked dynamically" >&2
+            exit 1
+          fi
+
+      - name: Build and test the Windows binary
+        if: matrix.family == 'windows'
+        shell: pwsh
+        env:
+          ASSET_NAME: ${{ matrix.binary }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force dist | Out-Null
+
+          $pcreRoot = 'C:\msys64\mingw64'
+          $pcreArchive = Join-Path $pcreRoot 'lib\libpcre.a'
+          if (-not (Test-Path $pcreArchive -PathType Leaf)) {
+            throw "PCRE static library was not found at $pcreArchive"
+          }
+
+          & nim c `
+            --mm:orc `
+            --threads:on `
+            -d:release `
+            -d:usePcreHeader `
+            --opt:speed `
+            '--passC:-DPCRE_STATIC' `
+            "--passC:-I$($pcreRoot.Replace('\', '/'))/include" `
+            "--passL:$($pcreArchive.Replace('\', '/'))" `
+            "-o:dist/$env:ASSET_NAME" `
+            src/ff.nim
+          if ($LASTEXITCODE -ne 0) {
+            throw "Nim compilation failed"
+          }
+
+          $strip = Get-Command strip.exe -ErrorAction SilentlyContinue
+          if ($strip) {
+            & $strip.Source "dist/$env:ASSET_NAME"
+            if ($LASTEXITCODE -ne 0) {
+              throw "strip failed"
+            }
+          }
+
+          & "dist/$env:ASSET_NAME" --version
+          if ($LASTEXITCODE -ne 0) {
+            throw "the release binary did not start"
+          }
+          $result = & "dist/$env:ASSET_NAME" --contains-re 'import std' --fixed ff.nim src
+          if ($LASTEXITCODE -ne 0 -or $result -notmatch 'ff\.nim') {
+            throw "the release binary failed its regex smoke test"
+          }
+
+      - name: Package the Unix release
+        if: matrix.family == 'unix'
+        shell: bash
+        env:
+          ASSET_NAME: ${{ matrix.binary }}
+          ARCHIVE_NAME: ${{ matrix.archive }}
+          PLATFORM_NAME: ${{ matrix.platform }}
+        run: |
+          set -Eeuo pipefail
+          package_root="package/fastfind-${PLATFORM_NAME}"
+          mkdir -p "${package_root}/share/man/man1"
+          cp "dist/${ASSET_NAME}" "${package_root}/ff"
+          ln -s ff "${package_root}/fastfind"
+          cp LICENSE README.md "${package_root}/"
+          cp mandoc/ff.1 "${package_root}/share/man/man1/ff.1"
+          cp mandoc/ff.1 "${package_root}/share/man/man1/fastfind.1"
+          tar -C package -czf "dist/${ARCHIVE_NAME}" "fastfind-${PLATFORM_NAME}"
+
+      - name: Package the Windows release
+        if: matrix.family == 'windows'
+        shell: pwsh
+        env:
+          ASSET_NAME: ${{ matrix.binary }}
+          ARCHIVE_NAME: ${{ matrix.archive }}
+          PLATFORM_NAME: ${{ matrix.platform }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $packageRoot = "package/fastfind-$env:PLATFORM_NAME"
+          New-Item -ItemType Directory -Force $packageRoot | Out-Null
+          Copy-Item "dist/$env:ASSET_NAME" "$packageRoot/ff.exe"
+          Copy-Item "dist/$env:ASSET_NAME" "$packageRoot/fastfind.exe"
+          Copy-Item LICENSE, README.md $packageRoot
+          Compress-Archive -Path $packageRoot -DestinationPath "dist/$env:ARCHIVE_NAME" -CompressionLevel Optimal
+
+      - name: Upload the packaged target
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-${{ matrix.platform }}
+          path: |
+            dist/${{ matrix.binary }}
+            dist/${{ matrix.archive }}
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  publish:
+    name: Attach binaries to ${{ github.event.release.tag_name || inputs.tag }}
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download every target
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          pattern: release-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Verify the release set and write checksums
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd release-assets
+
+          expected=(
+            ff-linux-glibc-amd64
+            ff-linux-glibc-arm64
+            ff-darwin-amd64
+            ff-darwin-arm64
+            ff-windows-amd64.exe
+            fastfind-linux-glibc-amd64.tar.gz
+            fastfind-linux-glibc-arm64.tar.gz
+            fastfind-darwin-amd64.tar.gz
+            fastfind-darwin-arm64.tar.gz
+            fastfind-windows-amd64.zip
+          )
+
+          for asset in "${expected[@]}"; do
+            test -s "${asset}" || {
+              echo "missing or empty release asset: ${asset}" >&2
+              exit 1
+            }
+          done
+
+          actual_count="$(find . -maxdepth 1 -type f | wc -l)"
+          if [[ "${actual_count}" -ne "${#expected[@]}" ]]; then
+            echo "unexpected files were found in the release set" >&2
+            find . -maxdepth 1 -type f -print >&2
+            exit 1
+          fi
+
+          printf '%s\0' "${expected[@]}" | sort -z | xargs -0 sha256sum > SHA256SUMS
+          sha256sum --check SHA256SUMS
+
+      - name: Upload assets to the GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null
+          gh release upload "${RELEASE_TAG}" release-assets/* \
+            --repo "${GITHUB_REPOSITORY}" \
+            --clobber
