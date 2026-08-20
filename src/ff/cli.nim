@@ -81,7 +81,8 @@ type
     fdMode*: bool
 
 const
-  Version* = "fastfind 2.2.2"
+  ProductVersion* = "2.3.0"
+  Version* = "fastfind " & ProductVersion
   
   # note: these were in here and unused
   # i have no idea what they do
@@ -305,7 +306,7 @@ proc helpText(useColor: bool): string =
   template row(a, b: string): string = "  " & pad(a, col1w) & b & "\n"
   
   result = ""
-  result.add(B("fastfind ") & G("2.2.2") & " - fast file finder\n")
+  result.add(B("fastfind ") & G(ProductVersion) & " - fast file finder\n")
   result.add(D("usage: ff [options] <pattern> [path] ...\n"))
   result.add("\n")
   

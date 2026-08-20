@@ -1,6 +1,6 @@
-# Changelog - fastfind v2.2.2
+# Changelog - fastfind v2.3.0
 
-## Unreleased - Engine Overhaul
+## v2.3.0 - Engine Overhaul
 
 - Replaced the object-heavy JSON index with the compact, versioned FFIDX004
   binary stream: root deduplication, relative paths, varint metadata, bounded
