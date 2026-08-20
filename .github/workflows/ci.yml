@@ -27,6 +27,9 @@ jobs:
       - name: Build optimized threaded binary
         run: nim c --mm:orc --threads:on -d:release --opt:speed -o:/tmp/fastfind-under-test src/ff.nim
 
+      - name: Check the Windows compilation path
+        run: nim check --os:windows --cpu:amd64 --threads:on -d:usePcreHeader src/ff.nim
+
       - name: Run parser and matcher tests
         run: nim c -r --mm:orc --threads:on --outdir:/tmp tests/test_nlp.nim
 

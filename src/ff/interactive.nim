@@ -23,6 +23,34 @@ when defined(posix):
   proc tcsetattr(fd: cint; actions: cint; t: ptr Termios): cint {.importc, header: "<termios.h>".}
 
 type
+  RawTerminalState = object
+    when defined(posix):
+      attrs: Termios
+
+proc readInput(fd: cint; buffer: pointer; count: int): int {.inline.} =
+  when defined(posix):
+    int(posix.read(fd, buffer, count))
+  else:
+    -1
+
+proc enableRawTerminal(fd: cint): RawTerminalState =
+  when defined(posix):
+    discard tcgetattr(fd, addr result.attrs)
+    var raw = result.attrs
+    raw.c_lflag = raw.c_lflag and not ICANON and not ECHO
+    raw.c_cc[VMIN] = 0
+    raw.c_cc[VTIME] = 1
+    discard tcsetattr(fd, TCSANOW, addr raw)
+  else:
+    stderr.writeLine("Interactive mode is not supported on Windows")
+    quit(1)
+
+proc restoreTerminal(fd: cint; state: RawTerminalState) =
+  when defined(posix):
+    var attrs = state.attrs
+    discard tcsetattr(fd, TCSANOW, addr attrs)
+
+type
   Mode = enum
     modeBrowse
     modeSearch
@@ -168,7 +196,7 @@ proc initState(cfg: Config): TUIState =
   result.confirmTarget = ""
   result.yankPath = ""
   result.lastJump = ' '
-  
+
   let bookmarkFile = getHomeDir() / ".config" / "fastfind" / "bookmarks"
   if fileExists(bookmarkFile):
     try:
@@ -258,7 +286,7 @@ proc getFileIcon(entry: FileEntry): string =
     return "📁 "
   if entry.kind == etLink:
     return "🔗 "
-  
+
   let ext = entry.name.splitFile.ext.toLowerAscii
   case ext
   of ".nim", ".py", ".rs", ".c", ".cpp", ".h", ".go", ".js", ".ts":
@@ -289,7 +317,7 @@ proc loadDirectory(state: var TUIState) =
   state.filtered = @[]
   state.cursor = 0
   state.scroll = 0
-  
+
   if state.cwd != "/":
     var parent: FileEntry
     parent.name = ".."
@@ -299,23 +327,23 @@ proc loadDirectory(state: var TUIState) =
     parent.size = -1
     parent.selected = false
     state.entries.add(parent)
-  
+
   var dirs: seq[FileEntry] = @[]
   var files: seq[FileEntry] = @[]
-  
+
   try:
     for kind, path in walkDir(state.cwd):
       let name = extractFilename(path)
-      
+
       if not state.showHidden and name.len > 0 and name[0] == '.':
         continue
-      
+
       var entry: FileEntry
       entry.name = name
       entry.path = path
       entry.relPath = name
       entry.selected = path in state.selectedPaths
-      
+
       case kind
       of pcFile:
         entry.kind = etFile
@@ -323,7 +351,7 @@ proc loadDirectory(state: var TUIState) =
         entry.kind = etDir
       of pcLinkToFile, pcLinkToDir:
         entry.kind = etLink
-      
+
       try:
         let info = getFileInfo(path)
         entry.size = info.size
@@ -331,7 +359,7 @@ proc loadDirectory(state: var TUIState) =
       except CatchableError:
         entry.size = 0
         entry.mtime = times.fromUnix(0)
-      
+
       if state.typeFilter.len > 0:
         case state.typeFilter
         of "f":
@@ -342,7 +370,7 @@ proc loadDirectory(state: var TUIState) =
           if entry.kind != etLink: continue
         else:
           discard
-      
+
       if entry.kind == etDir:
         dirs.add(entry)
       else:
@@ -350,17 +378,17 @@ proc loadDirectory(state: var TUIState) =
   except CatchableError:
     state.setMessage("Cannot read directory: " & state.cwd, "error")
     return
-  
+
   proc cmpName(a, b: FileEntry): int = cmpIgnoreCase(a.name, b.name)
   proc cmpSize(a, b: FileEntry): int = cmp(a.size, b.size)
   proc cmpTime(a, b: FileEntry): int = cmp(a.mtime.toUnix, b.mtime.toUnix)
-  proc cmpExt(a, b: FileEntry): int = 
+  proc cmpExt(a, b: FileEntry): int =
     let extA = a.name.splitFile.ext.toLowerAscii
     let extB = b.name.splitFile.ext.toLowerAscii
     result = cmp(extA, extB)
     if result == 0:
       result = cmpIgnoreCase(a.name, b.name)
-  
+
   case state.sortBy
   of "name":
     dirs.sort(cmpName)
@@ -377,36 +405,36 @@ proc loadDirectory(state: var TUIState) =
   else:
     dirs.sort(cmpName)
     files.sort(cmpName)
-  
+
   if state.sortReverse:
     dirs.reverse()
     files.reverse()
-  
+
   for d in dirs:
     state.entries.add(d)
   for f in files:
     state.entries.add(f)
-  
+
   state.applyFilter()
 
 proc applyFilter(state: var TUIState) =
   state.filtered = @[]
-  
+
   if state.query.len == 0:
     for i in 0 ..< state.entries.len:
       state.filtered.add(i)
     return
-  
+
   let queryLower = state.query.toLowerAscii()
   var scored: seq[tuple[score: int, idx: int]] = @[]
-  
+
   for i, entry in state.entries:
     if entry.name == "..":
       scored.add((-1000, i))
       continue
-    
+
     let nameLower = entry.name.toLowerAscii()
-    
+
     if queryLower.contains("*") or queryLower.contains("?"):
       let pattern = queryLower.replace(".", "\\.").replace("*", ".*").replace("?", ".")
       try:
@@ -419,12 +447,12 @@ proc applyFilter(state: var TUIState) =
       let score = fuzzyMatch(queryLower, nameLower)
       if score >= 0:
         scored.add((score, i))
-  
+
   scored.sort(proc(a, b: tuple[score: int, idx: int]): int = cmp(a.score, b.score))
-  
+
   for item in scored:
     state.filtered.add(item.idx)
-  
+
   if state.cursor >= state.filtered.len:
     state.cursor = max(0, state.filtered.len - 1)
   state.scroll = 0
@@ -432,23 +460,23 @@ proc applyFilter(state: var TUIState) =
 proc runGlobalSearch(state: var TUIState) =
   state.globalResults = @[]
   state.globalSearching = true
-  
+
   var searchCfg = state.baseConfig
-  
+
   let home = getHomeDir()
   searchCfg.paths = @[home, "/tmp", "/etc", "/usr/local", "/opt"]
-  
+
   searchCfg.patterns = @[state.globalPattern]
   searchCfg.limit = 500
   searchCfg.includeHidden = state.showHidden
   searchCfg.maxDepth = 10
-  
+
   searchCfg.excludes = @[
     "*.git*", "*node_modules*", "*__pycache__*", "*.cache*",
     "*/.local/share/Trash*", "*/snap/*", "*/.npm/*", "*/.cargo/registry/*",
     "*/proc/*", "*/sys/*", "*/dev/*", "*/run/*"
   ]
-  
+
   if state.globalPattern.startsWith("*."):
     searchCfg.matchMode = mmGlob
     searchCfg.pathMode = pmBaseName
@@ -459,10 +487,10 @@ proc runGlobalSearch(state: var TUIState) =
     searchCfg.matchMode = mmFixed
     searchCfg.pathMode = pmBaseName
     searchCfg.ignoreCase = true
-  
+
   try:
     let res = runSearchCollect(searchCfg)
-    
+
     for m in res.matches:
       var entry: FileEntry
       entry.name = m.name
@@ -475,13 +503,13 @@ proc runGlobalSearch(state: var TUIState) =
       state.globalResults.add(entry)
   except CatchableError:
     discard
-  
+
   state.globalSearching = false
   state.entries = state.globalResults
   state.filtered = @[]
   for i in 0 ..< state.entries.len:
     state.filtered.add(i)
-  
+
   state.cursor = 0
   state.scroll = 0
   state.setMessage("Found " & $state.entries.len & " results", "success")
@@ -524,13 +552,13 @@ proc drawBox(x, y, w, h: int; title: string = "") =
   else:
     stdout.write(repeat("─", w - 2))
   stdout.write("┐")
-  
+
   for i in 1 ..< h - 1:
     gotoXY(x, y + i)
     stdout.write("│")
     gotoXY(x + w - 1, y + i)
     stdout.write("│")
-  
+
   gotoXY(x, y + h - 1)
   stdout.write("└" & repeat("─", w - 2) & "┘")
   stdout.write(ColorReset)
@@ -540,13 +568,13 @@ proc safeDisplay(value: string): string
 proc drawHeader(state: TUIState) =
   gotoXY(1, 1)
   stdout.write(ColorHeader)
-  
+
   var modeIndicator = ""
   if state.globalMode:
     modeIndicator = " 🌍 GLOBAL "
-  
+
   let cwdDisplay = truncateLeft(safeDisplay(state.cwd), state.width - 30)
-  
+
   let modeStr = case state.mode
     of modeBrowse: "BROWSE"
     of modeSearch: "SEARCH"
@@ -555,14 +583,14 @@ proc drawHeader(state: TUIState) =
     of modeGoto: "GOTO"
     of modeFilter: "FILTER"
     of modeConfirm: "CONFIRM"
-  
+
   let sortIndicator = " [" & state.sortBy & (if state.sortReverse: "↓" else: "↑") & "]"
   let filterIndicator = if state.typeFilter.len > 0: " [type:" & state.typeFilter & "]" else: ""
-  
+
   let leftPart = " " & cwdDisplay
   let rightPart = modeIndicator & filterIndicator & sortIndicator & " [" & modeStr & "] "
   let padding = state.width - leftPart.len - rightPart.len
-  
+
   stdout.write(leftPart)
   if padding > 0:
     stdout.write(repeat(' ', padding))
@@ -572,10 +600,10 @@ proc drawHeader(state: TUIState) =
 proc highlightMatch(name: string; query: string; baseColor: string): string =
   if query.len == 0:
     return baseColor & name
-  
+
   let nameLower = name.toLowerAscii()
   let queryLower = query.toLowerAscii()
-  
+
   result = ""
   var qi = 0
   for i, ch in name:
@@ -584,7 +612,7 @@ proc highlightMatch(name: string; query: string; baseColor: string): string =
       inc qi
     else:
       result.add($ch)
-  
+
   result = baseColor & result
 
 proc safeDisplay(value: string): string =
@@ -597,7 +625,7 @@ proc safeDisplay(value: string): string =
 proc drawEntry(state: TUIState; entry: FileEntry; y: int; width: int; isSelected: bool; isCursor: bool) =
   gotoXY(1, y)
   clearLn()
-  
+
   var baseColor = ColorFile
   case entry.kind
   of etDir:
@@ -607,11 +635,11 @@ proc drawEntry(state: TUIState; entry: FileEntry; y: int; width: int; isSelected
   of etFile:
     if isExecutable(entry.path):
       baseColor = ColorExec
-  
+
   if isCursor:
     stdout.write(ColorSelected)
     baseColor = ""
-  
+
   var prefix = "  "
   if entry.selected:
     prefix = "● "
@@ -619,96 +647,96 @@ proc drawEntry(state: TUIState; entry: FileEntry; y: int; width: int; isSelected
     prefix = "▶ "
     if entry.selected:
       prefix = "◉ "
-  
+
   stdout.write(prefix)
-  
+
   let icon = getFileIcon(entry)
   stdout.write(icon)
-  
+
   let detailsWidth = if state.showDetails: 22 else: 0
   let nameWidth = width - 5 - icon.len - detailsWidth
   let displayName = safeDisplay(entry.name)
   let name = truncateRight(displayName, nameWidth)
-  
+
   if state.query.len > 0 and entry.name != "..":
     stdout.write(highlightMatch(padRight(name, nameWidth), state.query, baseColor))
   else:
     stdout.write(baseColor & padRight(name, nameWidth))
-  
+
   if state.showDetails:
     if not isCursor:
       stdout.write(ColorSize)
-    
+
     if entry.kind == etDir and entry.name != "..":
       stdout.write(padLeft("<DIR>", 8))
     elif entry.name == "..":
       stdout.write(padLeft("", 8))
     else:
       stdout.write(formatSize(entry.size))
-    
+
     stdout.write(" ")
-    
+
     if not isCursor:
       stdout.write(ColorTime)
-    
+
     if entry.name != "..":
       stdout.write(formatTime(entry.mtime))
-  
+
   stdout.write(ColorReset)
 
 proc drawList(state: TUIState) =
   let h = listHeight(state)
   let w = listWidth(state)
-  
+
   for i in 0 ..< h:
     let y = 2 + i
     let idx = state.scroll + i
-    
+
     if idx >= state.filtered.len:
       gotoXY(1, y)
       clearLn()
       continue
-    
+
     let entryIdx = state.filtered[idx]
     if entryIdx >= state.entries.len:
       continue
     let entry = state.entries[entryIdx]
     let isCursor = idx == state.cursor
     let isSelected = entry.selected
-    
+
     drawEntry(state, entry, y, w, isSelected, isCursor)
 
 proc drawPreview(state: TUIState) =
   if not state.showPreview:
     return
-  
+
   let pw = previewWidth(state)
   let px = listWidth(state) + 1
   let h = listHeight(state)
-  
+
   for i in 0 ..< h:
     gotoXY(px, 2 + i)
     stdout.write(ColorBorder & "│" & ColorReset)
     stdout.write(repeat(' ', pw - 1))
-  
+
   let entry = currentEntry(state)
   if entry.name.len == 0:
     return
-  
+
   gotoXY(px + 2, 2)
   stdout.write(ColorBold)
   stdout.write(truncateRight(safeDisplay(entry.name), pw - 4))
   stdout.write(ColorReset)
-  
+
   gotoXY(px + 2, 3)
   stdout.write(ColorDim)
   stdout.write(truncateRight(safeDisplay(entry.path), pw - 4))
   stdout.write(ColorReset)
-  
+
   if entry.kind == etDir:
     gotoXY(px + 2, 5)
     stdout.write(ColorPreview & "Directory" & ColorReset)
-    
+
     var count = 0
     var dirCount = 0
     var fileCount = 0
@@ -723,12 +751,12 @@ proc drawPreview(state: TUIState) =
           break
     except CatchableError:
       discard
-    
+
     gotoXY(px + 2, 6)
     let countStr = $dirCount & " dirs, " & $fileCount & " files"
     stdout.write(ColorPreview & countStr & ColorReset)
     return
-  
+
   if entry.kind == etLink:
     gotoXY(px + 2, 5)
     stdout.write(ColorPreview & "Symbolic Link" & ColorReset)
@@ -739,43 +767,43 @@ proc drawPreview(state: TUIState) =
     except CatchableError:
       discard
     return
-  
+
   if entry.kind != etFile:
     return
-  
+
   gotoXY(px + 2, 5)
   stdout.write(ColorDim & formatSize(entry.size) & " | " & formatTime(entry.mtime) & ColorReset)
-  
+
   var f: File
   if not open(f, entry.path, fmRead):
     gotoXY(px + 2, 7)
     stdout.write(ColorError & "Cannot read file" & ColorReset)
     return
-  
+
   defer: close(f)
-  
+
   var lineNum = 0
   let maxLines = h - 8
   let maxWidth = pw - 4
-  
+
   for line in f.lines:
     if lineNum >= maxLines:
       break
-    
+
     gotoXY(px + 2, 7 + lineNum)
-    
+
     var displayLine = line.replace("\t", "  ")
     var isBinary = false
     for ch in displayLine:
       if ord(ch) < 32 and ch notin ['\t', '\n', '\r']:
         isBinary = true
         break
-    
+
     if isBinary:
       gotoXY(px + 2, 7)
       stdout.write(ColorDim & "[Binary file]" & ColorReset)
       return
-    
+
     stdout.write(ColorPreview)
     stdout.write(truncateRight(displayLine, maxWidth))
     stdout.write(ColorReset)
@@ -785,29 +813,29 @@ proc drawStatusBar(state: TUIState) =
   gotoXY(1, state.height - 1)
   stdout.write(ColorStatus)
   clearLn()
-  
+
   let selectedCount = state.selectedPaths.len
   let totalCount = state.filtered.len
   let cursorPos = if totalCount > 0: state.cursor + 1 else: 0
-  
+
   var parts: seq[string] = @[]
-  
+
   if selectedCount > 0:
     parts.add($selectedCount & " selected")
-  
+
   parts.add($cursorPos & "/" & $totalCount)
-  
+
   if state.globalMode:
     parts.add("GLOBAL")
-  
+
   if state.showHidden:
     parts.add("hidden")
-  
+
   if state.typeFilter.len > 0:
     parts.add("type:" & state.typeFilter)
-  
+
   let left = " " & parts.join(" │ ")
-  
+
   let entry = currentEntry(state)
   var right = ""
   if entry.name.len > 0 and entry.name != "..":
@@ -821,7 +849,7 @@ proc drawStatusBar(state: TUIState) =
     except CatchableError:
       "---"
     right = perms & " │ " & formatSize(entry.size).strip() & " │ " & formatTime(entry.mtime).strip() & " "
-  
+
   let padding = state.width - left.len - right.len
   stdout.write(left)
   if padding > 0:
@@ -832,7 +860,7 @@ proc drawStatusBar(state: TUIState) =
 proc drawPrompt(state: TUIState) =
   gotoXY(1, state.height)
   clearLn()
-  
+
   case state.mode
   of modeBrowse:
     let elapsed = (times.getTime() - state.messageTime).inSeconds
@@ -865,7 +893,7 @@ proc drawPrompt(state: TUIState) =
     stdout.write(ColorPrompt & "filter type (f=file, d=dir, l=link, Enter=clear): " & ColorReset)
   of modeConfirm:
     stdout.write(ColorWarning & state.confirmAction & " " & state.confirmTarget & "? (y/n) " & ColorReset)
-  
+
   stdout.flushFile()
 
 proc drawBookmarks(state: TUIState) =
@@ -873,9 +901,9 @@ proc drawBookmarks(state: TUIState) =
   let bh = min(state.bookmarks.len + 4, state.height - 4)
   let bx = (state.width - bw) div 2
   let by = (state.height - bh) div 2
-  
+
   drawBox(bx, by, bw, bh, "Bookmarks")
-  
+
   if state.bookmarks.len == 0:
     gotoXY(bx + 2, by + 2)
     stdout.write(ColorDim & "No bookmarks. Press 'b' to add current dir." & ColorReset)
@@ -885,14 +913,14 @@ proc drawBookmarks(state: TUIState) =
         break
       gotoXY(bx + 2, by + 2 + i)
       stdout.write(ColorPrompt & $(i + 1) & ColorReset & " " & truncateRight(bm, bw - 6))
-  
+
   gotoXY(bx + 2, by + bh - 2)
   stdout.write(ColorDim & "1-9 jump │ d delete │ Esc close" & ColorReset)
 
 proc drawHelp(state: TUIState; fd: cint) =
   clearScr()
   stdout.write(ColorHeader & " fastfind interactive mode " & ColorReset & "\n\n")
-  
+
   stdout.write(ColorBold & "Navigation" & ColorReset & "\n")
   stdout.write("  j/↓         Move down          k/↑         Move up\n")
   stdout.write("  l/→/Enter   Enter directory    h/←         Parent directory\n")
@@ -902,42 +930,42 @@ proc drawHelp(state: TUIState; fd: cint) =
   stdout.write("  ~           Home directory     /           Root directory\n")
   stdout.write("  1-9         Quick jump dirs    Tab         Goto path\n")
   stdout.write("\n")
-  
+
   stdout.write(ColorBold & "Search & Filter" & ColorReset & "\n")
   stdout.write("  /           Local search       Esc         Clear search\n")
   stdout.write("  g           Toggle global      f           Filter by type\n")
   stdout.write("  Supports: fuzzy, *.ext, file??.txt patterns\n")
   stdout.write("\n")
-  
+
   stdout.write(ColorBold & "Selection" & ColorReset & "\n")
   stdout.write("  Space       Toggle select      v           Select all\n")
   stdout.write("  V           Clear selection    Enter       Confirm & exit\n")
   stdout.write("\n")
-  
+
   stdout.write(ColorBold & "View & Sort" & ColorReset & "\n")
   stdout.write("  .           Toggle hidden      p           Toggle preview\n")
   stdout.write("  i           Toggle details     s           Cycle sort\n")
   stdout.write("  r           Reverse sort\n")
   stdout.write("\n")
-  
+
   stdout.write(ColorBold & "Actions" & ColorReset & "\n")
   stdout.write("  y           Yank path          Enter       Open/select\n")
   stdout.write("  b           Add bookmark       B           Show bookmarks\n")
   stdout.write("  R           Refresh            :           Command mode\n")
   stdout.write("\n")
-  
+
   stdout.write(ColorBold & "Commands (:)" & ColorReset & "\n")
   stdout.write("  :cd PATH    Change directory   :q          Quit\n")
   stdout.write("  :h          Toggle hidden      :sort NAME  Set sort\n")
   stdout.write("  :exec CMD   Run cmd on files  :rm         Delete file(s)\n")
   stdout.write("  (use {} in exec cmd for path, e.g. :exec rm {})\n")
   stdout.write("\n")
-  
+
   stdout.write(ColorDim & "Press any key to continue..." & ColorReset)
   stdout.flushFile()
-  
+
   var dummy: char
-  while read(fd, addr dummy, 1) <= 0:
+  while readInput(fd, addr dummy, 1) <= 0:
     sleep(50)
 
 proc render(state: TUIState) =
@@ -954,21 +982,21 @@ proc navigateTo(state: var TUIState; path: string) =
   if newPath.startsWith("~"):
     newPath = getHomeDir() / newPath[1..^1]
   newPath = absolutePath(newPath)
-  
+
   if not dirExists(newPath):
     state.setMessage("Not a directory: " & path, "error")
     return
-  
+
   state.globalMode = false
   state.cwd = newPath
   state.query = ""
   state.mode = modeBrowse
-  
+
   if state.historyIndex < state.history.len - 1:
     state.history = state.history[0 .. state.historyIndex]
   state.history.add(newPath)
   state.historyIndex = state.history.len - 1
-  
+
   loadDirectory(state)
 
 proc goUp(state: var TUIState) =
@@ -1001,22 +1029,22 @@ proc enterDirectory(state: var TUIState) =
   let entry = currentEntry(state)
   if entry.name.len == 0:
     return
-  
+
   if entry.kind == etDir:
     navigateTo(state, entry.path)
 
 proc selectEntry(state: var TUIState) =
   if state.filtered.len == 0:
     return
-  
+
   let idx = state.filtered[state.cursor]
   if idx >= state.entries.len:
     return
   let entry = state.entries[idx]
-  
+
   if entry.name == "..":
     return
-  
+
   if entry.path in state.selectedPaths:
     state.selectedPaths.delete(state.selectedPaths.find(entry.path))
     state.entries[idx].selected = false
@@ -1064,7 +1092,7 @@ proc cycleSort(state: var TUIState) =
   of "time": state.sortBy = "ext"
   of "ext": state.sortBy = "name"
   else: state.sortBy = "name"
-  
+
   if not state.globalMode:
     loadDirectory(state)
   state.setMessage("Sort by: " & state.sortBy, "info")
@@ -1124,7 +1152,7 @@ proc executeCommand(state: var TUIState; cmd: string) =
   let parts = cmd.strip().split(' ', maxsplit = 1)
   if parts.len == 0:
     return
-  
+
   case parts[0].toLowerAscii()
   of "cd":
     if parts.len > 1:
@@ -1195,16 +1223,16 @@ proc executeCommand(state: var TUIState; cmd: string) =
 
 proc readKey(fd: cint): tuple[kind: string, ch: char] =
   var buf: array[8, char]
-  let n = read(fd, addr buf[0], 1)
-  
+  let n = readInput(fd, addr buf[0], 1)
+
   if n <= 0:
     return ("none", '\0')
-  
+
   let ch = buf[0]
-  
+
   if ch == '\x1b':
     var seqBuf: array[8, char]
-    let n2 = read(fd, addr seqBuf[0], 2)
+    let n2 = readInput(fd, addr seqBuf[0], 2)
     if n2 == 2 and seqBuf[0] == '[':
       case seqBuf[1]
       of 'A': return ("up", '\0')
@@ -1214,18 +1242,18 @@ proc readKey(fd: cint): tuple[kind: string, ch: char] =
       of 'H': return ("home", '\0')
       of 'F': return ("end", '\0')
       of '5':
-        discard read(fd, addr seqBuf[2], 1)
+        discard readInput(fd, addr seqBuf[2], 1)
         return ("pageup", '\0')
       of '6':
-        discard read(fd, addr seqBuf[2], 1)
+        discard readInput(fd, addr seqBuf[2], 1)
         return ("pagedown", '\0')
       of '3':
-        discard read(fd, addr seqBuf[2], 1)
+        discard readInput(fd, addr seqBuf[2], 1)
         return ("delete", '\0')
       else:
         return ("escape", '\0')
     return ("escape", '\0')
-  
+
   if ch == '\r' or ch == '\n':
     return ("enter", '\0')
   if ch == '\t':
@@ -1246,47 +1274,35 @@ proc readKey(fd: cint): tuple[kind: string, ch: char] =
     return ("space", ' ')
   if ch >= ' ' and ch <= '~':
     return ("char", ch)
-  
+
   return ("unknown", ch)
 
 proc runInteractive*(cfg: Config) =
-  when not defined(posix):
-    stderr.writeLine("Interactive mode requires POSIX system")
-    quit(1)
-  
   let stdinFd = cint(getFileHandle(stdin))
-  
-  var oldTermios: Termios
-  discard tcgetattr(stdinFd, addr oldTermios)
-  
-  var rawTermios = oldTermios
-  rawTermios.c_lflag = rawTermios.c_lflag and not ICANON and not ECHO
-  rawTermios.c_cc[VMIN] = 0
-  rawTermios.c_cc[VTIME] = 1
-  discard tcsetattr(stdinFd, TCSANOW, addr rawTermios)
-  
+  let terminalState = enableRawTerminal(stdinFd)
+
   var cleanupDone = false
-  
+
   proc cleanup() =
     if not cleanupDone:
-      discard tcsetattr(stdinFd, TCSANOW, addr oldTermios)
+      restoreTerminal(stdinFd, terminalState)
       showCur()
       clearScr()
       stdout.flushFile()
       cleanupDone = true
-  
+
   defer: cleanup()
-  
+
   clearScr()
-  
+
   var state = initState(cfg)
   loadDirectory(state)
-  
+
   var showingBookmarks = false
   var dirty = true
   var lastWidth = 0
   var lastHeight = 0
-  
+
   while state.running:
     state.width = terminalWidth()
     state.height = terminalHeight()
@@ -1298,14 +1314,14 @@ proc runInteractive*(cfg: Config) =
     if dirty:
       render(state)
       dirty = false
-    
+
     if showingBookmarks:
       drawBookmarks(state)
       stdout.flushFile()
-    
+
     let key = readKey(stdinFd)
     if key.kind != "none": dirty = true
-    
+
     if showingBookmarks:
       case key.kind
       of "escape":
@@ -1322,7 +1338,7 @@ proc runInteractive*(cfg: Config) =
         discard
       if key.kind != "none": dirty = true
       continue
-    
+
     case state.mode
     of modeBrowse:
       case key.kind
@@ -1330,7 +1346,7 @@ proc runInteractive*(cfg: Config) =
         sleep(10)
       of "char":
         case key.ch
-        of 'j': 
+        of 'j':
           if state.cursor < state.filtered.len - 1:
             inc state.cursor
             adjustScroll(state)
@@ -1424,7 +1440,7 @@ proc runInteractive*(cfg: Config) =
           enterDirectory(state)
         else:
           cleanupDone = true
-          discard tcsetattr(stdinFd, TCSANOW, addr oldTermios)
+          restoreTerminal(stdinFd, terminalState)
           showCur()
           stdout.write("\x1b[2J\x1b[H")
           if state.selectedPaths.len > 0:
@@ -1470,7 +1486,7 @@ proc runInteractive*(cfg: Config) =
           loadDirectory(state)
       else:
         discard
-    
+
     of modeSearch:
       case key.kind
       of "none":
@@ -1505,7 +1521,7 @@ proc runInteractive*(cfg: Config) =
           adjustScroll(state)
       else:
         discard
-    
+
     of modeGlobalSearch:
       case key.kind
       of "none":
@@ -1538,7 +1554,7 @@ proc runInteractive*(cfg: Config) =
         state.globalPattern = ""
       else:
         discard
-    
+
     of modeGoto:
       case key.kind
       of "none":
@@ -1556,7 +1572,7 @@ proc runInteractive*(cfg: Config) =
           basePath = basePath[0..^2]
         let parent = parentDir(basePath)
         let prefix = extractFilename(basePath).toLowerAscii()
-        
+
         if dirExists(parent):
           var matches: seq[string] = @[]
           try:
@@ -1566,7 +1582,7 @@ proc runInteractive*(cfg: Config) =
                 matches.add(path)
           except CatchableError:
             discard
-          
+
           if matches.len == 1:
             state.gotoPath = matches[0] & "/"
           elif matches.len > 1:
@@ -1590,7 +1606,7 @@ proc runInteractive*(cfg: Config) =
         state.gotoPath = ""
       else:
         discard
-    
+
     of modeCommand:
       case key.kind
       of "none":
@@ -1615,7 +1631,7 @@ proc runInteractive*(cfg: Config) =
         state.commandLine = ""
       else:
         discard
-    
+
     of modeFilter:
       case key.kind
       of "char":
@@ -1635,7 +1651,7 @@ proc runInteractive*(cfg: Config) =
         state.running = false
       else:
         discard
-    
+
     of modeConfirm:
       case key.kind
       of "char":
