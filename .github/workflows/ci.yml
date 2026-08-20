@@ -27,9 +27,6 @@ jobs:
       - name: Build optimized threaded binary
         run: nim c --mm:orc --threads:on -d:release --opt:speed -o:/tmp/fastfind-under-test src/ff.nim
 
-      - name: Check the Windows compilation path
-        run: nim check --os:windows --cpu:amd64 --threads:on -d:usePcreHeader src/ff.nim
-
       - name: Run parser and matcher tests
         run: nim c -r --mm:orc --threads:on --outdir:/tmp tests/test_nlp.nim
 
@@ -41,3 +38,61 @@ jobs:
           bash -n install.sh
           bash -n update.sh
           git diff --check
+
+  windows-build:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Set up Nim
+        uses: jiro4989/setup-nim-action@cb1fc1270b117457dd0d9f610ec981fad3369cec # v2
+        with:
+          nim-version: 2.2.10
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install PCRE development files
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & 'C:\msys64\usr\bin\bash.exe' -lc 'pacman -Sy --noconfirm --needed mingw-w64-x86_64-pcre'
+          if ($LASTEXITCODE -ne 0) {
+            throw "MSYS2 failed to install PCRE"
+          }
+
+      - name: Build and test the Windows binary
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $pcreRoot = 'C:\msys64\mingw64'
+          $pcreArchive = Join-Path $pcreRoot 'lib\libpcre.a'
+          if (-not (Test-Path $pcreArchive -PathType Leaf)) {
+            throw "PCRE static library was not found at $pcreArchive"
+          }
+
+          & nim c `
+            --mm:orc `
+            --threads:on `
+            -d:release `
+            -d:usePcreHeader `
+            --opt:speed `
+            '--passC:-DPCRE_STATIC' `
+            '--passC:-Wno-error=incompatible-pointer-types' `
+            "--passC:-I$($pcreRoot.Replace('\', '/'))/include" `
+            "--passL:$($pcreArchive.Replace('\', '/'))" `
+            '-o:fastfind-under-test.exe' `
+            src/ff.nim
+          if ($LASTEXITCODE -ne 0) {
+            throw "Nim compilation failed"
+          }
+
+          & .\fastfind-under-test.exe --version
+          if ($LASTEXITCODE -ne 0) {
+            throw "the Windows binary did not start"
+          }
+
+          $result = & .\fastfind-under-test.exe --contains-re 'import std' --fixed ff.nim src
+          if ($LASTEXITCODE -ne 0 -or $result -notmatch 'ff\.nim') {
+            throw "the Windows binary failed its regex smoke test"
+          }

@@ -178,6 +178,7 @@ jobs:
             -d:usePcreHeader `
             --opt:speed `
             '--passC:-DPCRE_STATIC' `
+            '--passC:-Wno-error=incompatible-pointer-types' `
             "--passC:-I$($pcreRoot.Replace('\', '/'))/include" `
             "--passL:$($pcreArchive.Replace('\', '/'))" `
             "-o:dist/$env:ASSET_NAME" `
