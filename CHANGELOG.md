@@ -1,4 +1,42 @@
-# Changelog - fastfind v2.3.0
+# Changelog - fastfind v2.4.0
+
+## v2.4.0 - Fast Path Update
+
+### Performance
+
+- Added an adaptive parallel POSIX count walker for simple glob and fixed
+  patterns. Broad roots are split into disjoint subtrees across up to eight
+  workers, while small trees stay single-threaded to avoid startup overhead.
+- Kept count workers allocation-local and used an atomic work index, avoiding
+  shared path queues, cross-thread string ownership, and lock contention.
+- Matched directly against `dirent` names and deferred string allocation until
+  a path is actually traversed or emitted.
+- Cached terminal detection once per streaming run instead of calling
+  `isatty()` for every emitted path.
+- Moved queued paths instead of copying them and released managed queue/result
+  storage explicitly.
+
+### Code Quality and Tests
+
+- Removed the abandoned parallel fast-path prototype, an unused atomic scan
+  implementation, unused worker fields, and unused queue/stat APIs.
+- Corrected fast-path visited/file/link accounting while consolidating path
+  construction helpers.
+- Added regression coverage for adaptive, serial, explicit-parallel, and
+  limited count traversal.
+- Added `benchmarks/compare_fd.sh`, which verifies equal result counts before
+  benchmarking listing and `fd | wc -l` workloads with Hyperfine.
+
+### Benchmark Snapshot
+
+On the release host (Linux 6.18.48, Intel i7-9700, warm cache, 104,401-entry
+synthetic tree, 30 Hyperfine runs), the optimized build averaged 22.2 ms for
+listing and 4.6 ms for counting. Version 2.3.0 averaged 36.8 ms and 21.7 ms
+respectively with the same LTO build settings. `fd` 10.5.0 averaged 22.8 ms for
+listing and 25.6 ms for `fd | wc -l`. Results vary substantially with tree
+shape and filesystem cache state; use the checked-in harness on your workload.
+
+---
 
 ## v2.3.0 - Engine Overhaul
 

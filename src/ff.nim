@@ -302,6 +302,9 @@ when isMainModule:
   else:
     var matched = 0
     var outputBuf = newStringOfCap(262144)
+    # isatty() is observable per-process state, not per-path state. Caching it
+    # avoids a syscall for every result in the hottest streaming output path.
+    let sanitizePaths = shouldSanitizeTerminalText(cfg.print0)
     let stats =
       if cfg.outputMode == omPlain:
         runSearchStreamPaths(cfg,
@@ -310,7 +313,10 @@ when isMainModule:
               discard
             else:
               inc matched
-              outputBuf.add(terminalText(p, cfg.print0))
+              if sanitizePaths:
+                outputBuf.add(sanitizeTerminalText(p))
+              else:
+                outputBuf.add(p)
               outputBuf.add(if cfg.print0: '\0' else: '\n')
               if outputBuf.len > 262140:
                 stdout.write(outputBuf)

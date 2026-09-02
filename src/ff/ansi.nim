@@ -147,12 +147,18 @@ proc sanitizeTerminalText*(value: string): string =
     else:
       result.add(c)
 
-proc terminalText*(value: string; preserveBytes: bool = false): string =
-  if preserveBytes: return value
+proc shouldSanitizeTerminalText*(preserveBytes: bool = false): bool =
+  ## Terminal detection is a syscall on POSIX. Callers that emit many paths
+  ## can cache this result instead of paying for it once per entry.
+  if preserveBytes: return false
   try:
-    if isatty(stdout): return sanitizeTerminalText(value)
+    isatty(stdout)
   except CatchableError:
-    discard
+    false
+
+proc terminalText*(value: string; preserveBytes: bool = false): string =
+  if shouldSanitizeTerminalText(preserveBytes):
+    return sanitizeTerminalText(value)
   value
 
 proc initColor*(mode: ColorMode = cmAuto) =

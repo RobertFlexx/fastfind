@@ -51,6 +51,22 @@ if "$bin" --fixed large.txt "$fixture/tree" --contains beyond-old-default-cap --
   exit 1
 fi
 
+# Broad count-only roots use the adaptive parallel walker. Its result must
+# remain identical to explicit serial/parallel traversal and respect limits.
+mkdir -p "$fixture/wide"/{01..20}
+for directory in "$fixture/wide"/*; do
+  printf x > "$directory/item.txt"
+done
+wide_auto="$($bin --count '*' "$fixture/wide")"
+wide_serial="$($bin -j 1 --count '*' "$fixture/wide")"
+wide_parallel="$($bin -j 4 --count '*' "$fixture/wide")"
+[ "$wide_auto" = 40 ]
+[ "$wide_auto" = "$wide_serial" ]
+[ "$wide_auto" = "$wide_parallel" ]
+[ "$($bin -j 4 --count '*.txt' "$fixture/wide")" = 20 ]
+[ "$($bin -j 4 --count --type dir '*' "$fixture/wide")" = 20 ]
+[ "$($bin --count --limit 7 '*' "$fixture/wide")" = 7 ]
+
 # Following a directory cycle must terminate and must not duplicate forever.
 timeout 5 "$bin" --follow --limit 100 '*' "$fixture/tree" >/dev/null
 

@@ -1,7 +1,5 @@
 # src/ff/search.nim
 
-# Notice: large swaths of commented-in code are here!
-# I noticed they were unused, but didn't know if they were important or will be used in the future
 import std/[os, strutils, options, re, times, sets]
 import core, cli, matchers, content, fuzzy_match
 
@@ -9,7 +7,7 @@ when defined(posix):
   import std/posix
 
 when compileOption("threads"):
-  # import std/[locks, atomics, threadpool, cpuinfo]
+  import std/[atomics, cpuinfo]
   import parallel
 
 type
@@ -38,18 +36,14 @@ when compileOption("threads"):
       needInfo: bool
       includeHidden: bool
       needResultName: bool
-      matchAll: bool
       hasExcludes: bool
       oneFileSystem: bool
-      spKind: SimplePatternKind
-      spCore: string
 
     WorkerArgs = object
       ctx: ptr WorkerContext
       queue: WorkQueue
       results: ResultCollector
       stats: AtomicStats
-      workerId: int
 
 proc effectiveThreadCount(cfg: Config): int {.inline.} =
   when compileOption("threads"):
@@ -71,9 +65,6 @@ proc isHiddenPath(relPath: string): bool {.inline.} =
     if c == '/' or c == '\\':
       if relPath[i + 1] == '.': return true
   false
-
-# proc isHiddenName(name: string): bool {.inline.} =
-#   name.len > 0 and name[0] == '.'
 
 proc containsUpper(s: string): bool {.inline.} =
   for ch in s:
@@ -613,40 +604,355 @@ when defined(posix):
     PosixStackEntry = object
       absPath: string
       relPath: string
-      depth: int
 
-  proc direntKind(d: ptr Dirent; parentAbs, name: string): EntryType =
+  proc direntNameLen(name: cstring): int {.inline.} =
+    while name[result] != '\0':
+      inc result
+
+  proc appendDirentName(buf: var string; name: cstring; nameLen: int) {.inline.} =
+    let oldLen = buf.len
+    buf.setLen(oldLen + nameLen)
+    if nameLen > 0:
+      copyMem(addr buf[oldLen], name, nameLen)
+
+  proc setJoinedPath(buf: var string; parent: string;
+                     name: cstring; nameLen: int) {.inline.} =
+    buf.setLen(0)
+    buf.add(parent)
+    if parent.len > 0 and parent[^1] != '/':
+      buf.add('/')
+    buf.appendDirentName(name, nameLen)
+
+  proc direntKind(d: ptr Dirent; parentAbs: string;
+                  name: cstring; nameLen: int): EntryType =
     when declared(DT_DIR):
       if d.d_type == DT_DIR: return etDir
       if d.d_type == DT_REG: return etFile
       if d.d_type == DT_LNK: return etLink
-    let fullPath = parentAbs & "/" & name
+    var fullPath = newStringOfCap(parentAbs.len + nameLen + 1)
+    fullPath.setJoinedPath(parentAbs, name, nameLen)
     var st: Stat
     if lstat(fullPath.cstring, st) == 0:
       if S_ISDIR(st.st_mode): return etDir
       if S_ISLNK(st.st_mode): return etLink
     etFile
 
-  proc direntIsRegular(d: ptr Dirent; parentAbs, name: string): bool =
+  proc direntIsRegular(d: ptr Dirent; parentAbs: string;
+                       name: cstring; nameLen: int): bool =
     when declared(DT_REG):
       if d.d_type == DT_REG: return true
       when declared(DT_UNKNOWN):
         if d.d_type != DT_UNKNOWN: return false
-    isRegularFile(parentAbs & "/" & name)
+    var fullPath = newStringOfCap(parentAbs.len + nameLen + 1)
+    fullPath.setJoinedPath(parentAbs, name, nameLen)
+    isRegularFile(fullPath)
+
+  proc matchSimpleName(name: cstring; nameLen: int;
+                       kind: SimplePatternKind; core: string;
+                       ignoreCase: bool): bool {.inline.} =
+    template equalAt(nameIdx, coreIdx: int): bool =
+      (if ignoreCase:
+        var c = name[nameIdx]
+        if c in {'A'..'Z'}: c = chr(ord(c) + 32)
+        c == core[coreIdx]
+      else:
+        name[nameIdx] == core[coreIdx])
+
+    case kind
+    of spkUniversal:
+      true
+    of spkExact:
+      if core.len != nameLen: return false
+      for i in 0..<core.len:
+        if not equalAt(i, i): return false
+      true
+    of spkPrefix:
+      if core.len > nameLen: return false
+      for i in 0..<core.len:
+        if not equalAt(i, i): return false
+      true
+    of spkSuffix:
+      if core.len > nameLen: return false
+      let start = nameLen - core.len
+      for i in 0..<core.len:
+        if not equalAt(start + i, i): return false
+      true
+    of spkContains:
+      if core.len == 0: return true
+      if core.len > nameLen: return false
+      let last = nameLen - core.len
+      var start = 0
+      while start <= last:
+        var matches = true
+        for i in 0..<core.len:
+          if not equalAt(start + i, i):
+            matches = false
+            break
+        if matches: return true
+        inc start
+      false
+
+  proc runCountAllPosix(cfg: Config; rootAbs: string;
+                        emitted: var int): Stats =
+    ## Universal count is common in scripts and benchmarks. It needs neither
+    ## relative paths nor filenames for ordinary files, so keep it separate
+    ## from the output-oriented walker and allocate only for child directories.
+    var stack = newSeqOfCap[string](64)
+    stack.add(rootAbs)
+    var childPath = newStringOfCap(512)
+    let wantHidden = cfg.includeHidden
+    let hasLimit = cfg.limit > 0
+    let oneFileSystem = cfg.oneFileSystem
+    let rootDev = if oneFileSystem: getDeviceId(rootAbs) else: -1
+
+    while stack.len > 0:
+      if hasLimit and emitted >= cfg.limit: break
+      let currentPath = stack.pop()
+      inc result.visitedDirs
+      inc result.visited
+
+      let dirp = opendir(currentPath.cstring)
+      if dirp.isNil:
+        inc result.errors
+        continue
+
+      while true:
+        if hasLimit and emitted >= cfg.limit: break
+        let dent = readdir(dirp)
+        if dent.isNil: break
+        let name = cast[cstring](addr dent.d_name[0])
+        if name[0] == '.':
+          if name[1] == '\0' or (name[1] == '.' and name[2] == '\0'):
+            continue
+          if not wantHidden:
+            inc result.skipped
+            continue
+
+        var nameLen = -1
+        template getNameLen(): int =
+          if nameLen < 0: nameLen = direntNameLen(name)
+          nameLen
+
+        let kindVal = when declared(DT_DIR):
+          if dent.d_type == DT_DIR: etDir
+          elif dent.d_type == DT_REG: etFile
+          elif dent.d_type == DT_LNK: etLink
+          else: direntKind(dent, currentPath, name, getNameLen())
+        else:
+          direntKind(dent, currentPath, name, getNameLen())
+
+        inc result.visited
+        case kindVal
+        of etFile: inc result.visitedFiles
+        of etLink: inc result.visitedLinks
+        of etDir:
+          childPath.setJoinedPath(currentPath, name, getNameLen())
+          if oneFileSystem and rootDev >= 0:
+            let dev = getDeviceId(childPath)
+            if dev < 0 or dev != rootDev: continue
+          stack.add(childPath)
+
+        inc result.matched
+        inc emitted
+      discard closedir(dirp)
+
+  when compileOption("threads"):
+    type
+      CountWorkerContext = object
+        includeHidden: bool
+        oneFileSystem: bool
+        rootDev: int64
+        patternKind: SimplePatternKind
+        pattern: string
+        ignoreCase: bool
+        types: set[EntryType]
+        defaultTypes: bool
+
+      CountWorkerArgs = object
+        ctx: ptr CountWorkerContext
+        roots: ptr UncheckedArray[string]
+        rootCount: int
+        nextRoot: ptr Atomic[int]
+        stats: AtomicStats
+
+    proc scanCountDirectory(ctx: ptr CountWorkerContext; directory: string;
+                            childDirs: var seq[string]; childPath: var string;
+                            stats: var Stats) {.gcsafe.} =
+      childDirs.setLen(0)
+      inc stats.visitedDirs
+      inc stats.visited
+      let dirp = opendir(directory.cstring)
+      if dirp.isNil:
+        inc stats.errors
+        return
+
+      while true:
+        let dent = readdir(dirp)
+        if dent.isNil: break
+        let name = cast[cstring](addr dent.d_name[0])
+        if name[0] == '.':
+          if name[1] == '\0' or (name[1] == '.' and name[2] == '\0'):
+            continue
+          if not ctx.includeHidden:
+            inc stats.skipped
+            continue
+
+        var nameLen = -1
+        template getNameLen(): int =
+          if nameLen < 0: nameLen = direntNameLen(name)
+          nameLen
+
+        let kindVal = when declared(DT_DIR):
+          if dent.d_type == DT_DIR: etDir
+          elif dent.d_type == DT_REG: etFile
+          elif dent.d_type == DT_LNK: etLink
+          else: direntKind(dent, directory, name, getNameLen())
+        else:
+          direntKind(dent, directory, name, getNameLen())
+
+        inc stats.visited
+        case kindVal
+        of etFile: inc stats.visitedFiles
+        of etLink: inc stats.visitedLinks
+        of etDir:
+          childPath.setJoinedPath(directory, name, getNameLen())
+          if ctx.oneFileSystem and ctx.rootDev >= 0:
+            let dev = getDeviceId(childPath)
+            if dev < 0 or dev != ctx.rootDev: continue
+          childDirs.add(childPath)
+
+        if ctx.patternKind != spkUniversal and
+            not matchSimpleName(name, getNameLen(), ctx.patternKind,
+                                ctx.pattern, ctx.ignoreCase):
+          continue
+        if ctx.defaultTypes or kindVal in ctx.types:
+          let requireRegular = kindVal == etFile and etFile in ctx.types and
+            not ctx.defaultTypes
+          if requireRegular and
+              not direntIsRegular(dent, directory, name, getNameLen()):
+            inc stats.skipped
+            continue
+          inc stats.matched
+
+      discard closedir(dirp)
+
+    proc cloneSharedString(value: var string): string {.inline, gcsafe.} =
+      result = newString(value.len)
+      if value.len > 0:
+        copyMem(addr result[0], unsafeAddr value[0], value.len)
+
+    proc countSimpleWorker(args: CountWorkerArgs) {.thread, gcsafe.} =
+      let ctx = args.ctx
+      var localStats: Stats
+      var stack = newSeqOfCap[string](64)
+      var childDirs = newSeqOfCap[string](64)
+      var childPath = newStringOfCap(512)
+
+      while true:
+        let rootIdx = args.nextRoot[].fetchAdd(1)
+        if rootIdx >= args.rootCount: break
+        stack.add(cloneSharedString(args.roots[rootIdx]))
+
+        while stack.len > 0:
+          let directory = stack.pop()
+          scanCountDirectory(ctx, directory, childDirs, childPath, localStats)
+          for child in childDirs.mitems:
+            stack.add(move child)
+
+      args.stats.addStats(localStats)
+
+    proc countThreadCount(cfg: Config; rootAbs: string): int =
+      if cfg.threads > 0:
+        return effectiveThreadCount(cfg)
+
+      # Directory link count is a cheap fan-out hint on conventional POSIX
+      # filesystems. Keep small/narrow trees serial; broad roots can amortize
+      # thread startup and distribute their children immediately.
+      var st: Stat
+      if posix.stat(rootAbs.cstring, st) != 0 or st.st_nlink < 16:
+        return 1
+      max(1, min(countProcessors(), 8))
+
+    proc runCountSimpleParallelPosix(cfg: Config; rootAbs: string;
+                                     kind: SimplePatternKind; core: string;
+                                     ignoreCase: bool; workerCount: int;
+                                     emitted: var int): Stats =
+      var ctx = CountWorkerContext(
+        includeHidden: cfg.includeHidden,
+        oneFileSystem: cfg.oneFileSystem,
+        rootDev: if cfg.oneFileSystem: getDeviceId(rootAbs) else: -1,
+        patternKind: kind,
+        pattern: core,
+        ignoreCase: ignoreCase,
+        types: cfg.types,
+        defaultTypes: cfg.types == {etFile, etDir, etLink}
+      )
+      var roots = newSeqOfCap[string](workerCount * 4)
+      var children = newSeqOfCap[string](64)
+      var childPath = newStringOfCap(512)
+      scanCountDirectory(addr ctx, rootAbs, roots, childPath, result)
+
+      # Split high-fan-out children before starting the workers. Recursing only
+      # through branch points prevents a large subtree from becoming a single
+      # straggler without serially walking leaf-heavy directory chains.
+      var pendingRoots = move roots
+      var workRoots = newSeqOfCap[string](max(pendingRoots.len, workerCount * 4))
+      while pendingRoots.len > 0:
+        var directory = pendingRoots.pop()
+        var st: Stat
+        if posix.stat(directory.cstring, st) == 0 and st.st_nlink >= 16:
+          scanCountDirectory(addr ctx, directory, children, childPath, result)
+          for child in children.mitems:
+            pendingRoots.add(move child)
+        else:
+          workRoots.add(move directory)
+      roots = move workRoots
+
+      if roots.len == 0:
+        emitted += result.matched
+        return
+
+      let stats = newAtomicStats()
+      stats.addStats(result)
+      var nextRoot: Atomic[int]
+      nextRoot.store(0)
+      let rootsPtr = cast[ptr UncheckedArray[string]](addr roots[0])
+      let activeWorkers = min(workerCount, roots.len)
+
+      var threads = newSeq[Thread[CountWorkerArgs]](activeWorkers)
+      for i in 0..<activeWorkers:
+        let args = CountWorkerArgs(ctx: addr ctx, roots: rootsPtr,
+          rootCount: roots.len, nextRoot: addr nextRoot, stats: stats)
+        createThread(threads[i], countSimpleWorker, args)
+      for thread in threads.mitems:
+        joinThread(thread)
+
+      result = stats.toStats(times.fromUnix(0), times.fromUnix(0))
+      emitted += result.matched
+      stats.destroy()
 
   proc runSearchStreamPathsSimplePosix(cfg: Config; rootAbs: string;
                                        kind: SimplePatternKind; coreCmp: string;
                                        ignoreCase: bool; emitted: var int;
                                        onPath: proc(p: string)): Stats =
+    let defaultTypes = cfg.types == {etFile, etDir, etLink}
+    if cfg.countOnly:
+      when compileOption("threads"):
+        let workerCount = countThreadCount(cfg, rootAbs)
+        if workerCount > 1 and cfg.limit == 0:
+          return runCountSimpleParallelPosix(cfg, rootAbs, kind, coreCmp,
+                                             ignoreCase, workerCount, emitted)
+      if kind == spkUniversal and defaultTypes:
+        return runCountAllPosix(cfg, rootAbs, emitted)
+
     var stack = newSeqOfCap[PosixStackEntry](64)
-    stack.add(PosixStackEntry(absPath: rootAbs, relPath: "", depth: 0))
+    stack.add(PosixStackEntry(absPath: rootAbs, relPath: ""))
     let hasLimit = cfg.limit > 0
     var pathBuf = newStringOfCap(512)
     var absBuf = newStringOfCap(512)
     
     let wantAbsolute = cfg.absolute
     let wantHidden = cfg.includeHidden
-    let defaultTypes = cfg.types == {etFile, etDir, etLink}
     let oneFileSystem = cfg.oneFileSystem
     let rootDev = if oneFileSystem: getDeviceId(rootAbs) else: -1
 
@@ -678,202 +984,75 @@ when defined(posix):
           break
         let dent = readdir(dirp)
         if dent.isNil: break
-        let name = $cast[cstring](addr dent.d_name[0])
-        if name == "." or name == "..":
-          continue
-        if not wantHidden and name.len > 0 and name[0] == '.':
-          inc result.skipped
-          continue
+        let name = cast[cstring](addr dent.d_name[0])
+        if name[0] == '.':
+          if name[1] == '\0' or (name[1] == '.' and name[2] == '\0'):
+            continue
+          if not wantHidden:
+            inc result.skipped
+            continue
 
-        if not matchSimpleBase(name, kind, coreCmp, ignoreCase):
-          inc result.visited
-          when declared(DT_DIR):
-            if dent.d_type == DT_DIR:
-              inc result.visitedDirs
-              absBuf.setLen(0)
-              absBuf.add(currentAbsPath)
-              if currentAbsPath.len > 0 and currentAbsPath[^1] != '/':
-                absBuf.add('/')
-              absBuf.add(name)
-              if not sameFileSystemDir(absBuf):
-                continue
-              if currentRelEmpty:
-                stack.add(PosixStackEntry(absPath: absBuf, relPath: name, depth: entry.depth + 1))
-              else:
-                pathBuf.setLen(0)
-                pathBuf.add(currentRelPath)
-                pathBuf.add('/')
-                pathBuf.add(name)
-                stack.add(PosixStackEntry(absPath: absBuf, relPath: pathBuf, depth: entry.depth + 1))
-            elif dent.d_type == DT_REG:
-              inc result.visitedFiles
-            elif dent.d_type == DT_LNK:
-              inc result.visitedLinks
-          continue
+        var nameLen = -1
+        template getNameLen(): int =
+          if nameLen < 0: nameLen = direntNameLen(name)
+          nameLen
 
         let kindVal = when declared(DT_DIR):
           if dent.d_type == DT_DIR: etDir
           elif dent.d_type == DT_REG: etFile
           elif dent.d_type == DT_LNK: etLink
-          else: direntKind(dent, currentAbsPath, name)
+          else: direntKind(dent, currentAbsPath, name, getNameLen())
         else:
-          direntKind(dent, currentAbsPath, name)
+          direntKind(dent, currentAbsPath, name, getNameLen())
 
-        if kindVal == etDir or (kindVal == etLink and shouldFollowLinkDir(cfg, currentAbsPath / name)):
-          let childDepth = entry.depth + 1
-          absBuf.setLen(0)
-          absBuf.add(currentAbsPath)
-          if currentAbsPath.len > 0 and currentAbsPath[^1] != '/':
-            absBuf.add('/')
-          absBuf.add(name)
+        inc result.visited
+        case kindVal
+        of etFile: inc result.visitedFiles
+        of etLink: inc result.visitedLinks
+        of etDir: discard
+
+        # The simple path mode never follows links, so only real directories
+        # need persistent paths. Ordinary files remain allocation-free when
+        # counting or when their name does not match.
+        if kindVal == etDir:
+          absBuf.setJoinedPath(currentAbsPath, name, getNameLen())
           if not sameFileSystemDir(absBuf):
             continue
+          pathBuf.setLen(0)
           if currentRelEmpty:
-            stack.add(PosixStackEntry(absPath: absBuf, relPath: name, depth: childDepth))
+            pathBuf.appendDirentName(name, getNameLen())
           else:
-            pathBuf.setLen(0)
             pathBuf.add(currentRelPath)
             pathBuf.add('/')
-            pathBuf.add(name)
-            stack.add(PosixStackEntry(absPath: absBuf, relPath: pathBuf, depth: childDepth))
+            pathBuf.appendDirentName(name, getNameLen())
+          stack.add(PosixStackEntry(absPath: absBuf, relPath: pathBuf))
+
+        if kind != spkUniversal and
+            not matchSimpleName(name, getNameLen(), kind, coreCmp, ignoreCase):
+          continue
 
         if defaultTypes or (kindVal in cfg.types):
-          if needsRegularFileCheck(cfg, kindVal) and not direntIsRegular(dent, currentAbsPath, name):
+          if needsRegularFileCheck(cfg, kindVal) and
+              not direntIsRegular(dent, currentAbsPath, name, getNameLen()):
             inc result.skipped
             continue
           inc result.matched
           if cfg.countOnly:
             discard
           elif wantAbsolute:
-            absBuf.setLen(0)
-            absBuf.add(currentAbsPath)
-            if currentAbsPath.len > 0 and currentAbsPath[^1] != '/':
-              absBuf.add('/')
-            absBuf.add(name)
+            if kindVal != etDir:
+              absBuf.setJoinedPath(currentAbsPath, name, getNameLen())
             onPath(absBuf)
-          elif currentRelEmpty:
-            onPath(name)
           else:
             pathBuf.setLen(0)
-            pathBuf.add(currentRelPath)
-            pathBuf.add('/')
-            pathBuf.add(name)
+            if not currentRelEmpty:
+              pathBuf.add(currentRelPath)
+              pathBuf.add('/')
+            pathBuf.appendDirentName(name, getNameLen())
             onPath(pathBuf)
           inc emitted
 
 when compileOption("threads"):
-  proc scanEntryAtomic(rootAbs: string; cfg: Config; matcher: Matcher;
-                       ex: Excluder; gi: Gitignore; useGi: bool;
-                       rootDev: int64; fullPath, relPath: string;
-                       kind: EntryType; depth: int;
-                       contentRx: Option[Regex]; cachedIC: bool;
-                       needInfo: bool; includeHidden: bool;
-                       needResultName: bool;
-                       matchAll: bool;
-                       hasExcludes: bool;
-                       stats: AtomicStats): Option[MatchResult] {.used.} =
-    if kind notin cfg.types:
-      stats.incSkipped()
-      return none(MatchResult)
-
-    if needsRegularFileCheck(cfg, kind) and not isRegularFile(fullPath):
-      stats.incSkipped()
-      return none(MatchResult)
-
-    if cfg.minDepth > 0 and depth < cfg.minDepth:
-      stats.incSkipped()
-      return none(MatchResult)
-
-    if cfg.maxDepth >= 0 and depth > cfg.maxDepth:
-      stats.incSkipped()
-      return none(MatchResult)
-
-    if not includeHidden and isHiddenPath(relPath):
-      stats.incSkipped()
-      return none(MatchResult)
-
-    if hasExcludes and ex.isExcluded(relPath):
-      stats.incSkipped()
-      return none(MatchResult)
-
-    if useGi and isGitIgnored(gi, fullPath):
-      stats.incSkipped()
-      return none(MatchResult)
-
-    if (cfg.containsText.len > 0 or cfg.containsRegex.len > 0) and kind != etFile:
-      stats.incSkipped()
-      return none(MatchResult)
-
-    var name = ""
-    template ensureName() =
-      if name.len == 0:
-        name = extractName(relPath)
-    var fuzzyScore = -1
-
-    if not passesExtensions(cfg, relPath):
-      stats.incSkipped()
-      return none(MatchResult)
-
-    if matchAll:
-      ensureName()
-    elif cfg.fuzzyMode or cfg.matchMode == mmFuzzy:
-      ensureName()
-      let target = if matcher.pathMode == pmFullPath: relPath else: name
-      let t = if cachedIC: target.toLowerAscii() else: target
-      var bestScore = 999999
-      for pat in matcher.fixed:
-        let score = fuzzyMatch(pat, t)
-        if score >= 0 and score < bestScore:
-          bestScore = score
-      if bestScore >= 999999:
-        return none(MatchResult)
-      fuzzyScore = bestScore
-    elif not matchAll:
-      if not matcher.anyMatch(name, relPath):
-        return none(MatchResult)
-
-    if needResultName:
-      ensureName()
-
-    var size: int64 = 0
-    var mtime: times.Time = times.fromUnix(0)
-
-    if needInfo:
-      var info: FileInfo
-      try:
-        info = getFileInfo(fullPath, followSymlink = cfg.followSymlinks)
-      except CatchableError:
-        stats.incErrors()
-        return none(MatchResult)
-      size = info.size.int64
-      mtime = info.lastWriteTime
-      if not passesSize(cfg, size) or not passesTime(cfg, mtime):
-        stats.incSkipped()
-        return none(MatchResult)
-      if cfg.containsText.len > 0:
-        var br: int64 = 0
-        let ok = fileContainsTextSmart(fullPath, cfg.containsText, cfg.maxBytes,
-          cfg.allowBinary, br, size, effectiveContentIgnoreCase(cfg))
-        stats.addBytesRead(br)
-        if not ok: return none(MatchResult)
-      if cfg.containsRegex.len > 0:
-        if contentRx.isNone: return none(MatchResult)
-        var br: int64 = 0
-        let ok = fileContainsRegexSmart(fullPath, contentRx.get, cfg.maxBytes, cfg.allowBinary, br, size)
-        stats.addBytesRead(br)
-        if not ok: return none(MatchResult)
-
-    some(MatchResult(
-      path: relPath,
-      relPath: relPath,
-      absPath: fullPath,
-      name: if needResultName: name else: "",
-      size: size,
-      mtime: mtime,
-      kind: kind,
-      fuzzyScore: fuzzyScore
-    ))
-
   proc workerProc(args: WorkerArgs) {.thread, gcsafe.} =
     let ctx = args.ctx
     var localMatches = newSeqOfCap[MatchResult](128)
@@ -934,7 +1113,7 @@ when compileOption("threads"):
                                    ctx.ex, gi, ctx.useGi,
                                    ctx.rootDev, fullPath, ctx.includeHidden,
                                    ctx.hasExcludes, ctx.oneFileSystem):
-              childDirs.add(DirEntry(path: fullPath, relPath: relPath, depth: childDepth))
+              childDirs.add(DirEntry(path: fullPath, depth: childDepth))
 
             let om = scanEntry(
               ctx.rootAbs, ctx.cfg, ctx.matcher,
@@ -974,187 +1153,6 @@ when compileOption("threads"):
         args.queue.signalShutdown()
     args.stats.addStats(localStats)
 
-#   proc workerFastPathProc(args: WorkerArgs) {.thread, gcsafe.} =
-#     let ctx = args.ctx
-#     var localMatches = newSeqOfCap[MatchResult](256)
-#     var pathBuf = newStringOfCap(512)
-#
-#     while true:
-#       if args.queue.isShutdown() or args.results.isLimitReached():
-#         break
-#
-#       var batch = args.queue.tryPopBatch(2048)
-#
-#       if batch.len == 0:
-#         if args.queue.isComplete():
-#           break
-#         os.sleep(1)
-#         continue
-#
-#       for entry in batch:
-#         args.stats.incVisitedDirs()
-#         args.stats.incVisited()
-#
-#         let dirp = opendir(entry.path.cstring)
-#         if dirp.isNil:
-#           args.stats.incErrors()
-#           continue
-#         defer: discard closedir(dirp)
-#
-#         let currentPath = entry.path
-#         let currentRelPath = entry.relPath
-#         let currentRelEmpty = currentRelPath.len == 0
-#         var currentPathSlash = ""
-#         if currentPath.len > 0 and currentPath[^1] != '/':
-#           currentPathSlash = currentPath & '/'
-#         else:
-#           currentPathSlash = currentPath
-#
-#         var childDirs = newSeqOfCap[DirEntry](128)
-#
-#         while true:
-#           if args.results.isLimitReached():
-#             break
-#           let dent = readdir(dirp)
-#           if dent.isNil: break
-#           let name = $cast[cstring](addr dent.d_name[0])
-#           if name == "." or name == "..":
-#             continue
-#           if not ctx.includeHidden and name.len > 0 and name[0] == '.':
-#             args.stats.incSkipped()
-#             continue
-#
-#           if not matchSimpleBase(name, ctx.spKind, ctx.spCore, ctx.cachedIC):
-#             args.stats.incVisited()
-#             when declared(DT_DIR):
-#               if dent.d_type == DT_DIR:
-#                 args.stats.incVisitedDirs()
-#                 if currentRelEmpty:
-#                   childDirs.add(DirEntry(path: currentPathSlash & name, relPath: name, depth: entry.depth + 1))
-#                 else:
-#                   pathBuf.setLen(0)
-#                   pathBuf.add(currentRelPath)
-#                   pathBuf.add('/')
-#                   pathBuf.add(name)
-#                   childDirs.add(DirEntry(path: currentPathSlash & name, relPath: pathBuf, depth: entry.depth + 1))
-#             continue
-#
-#           args.stats.incMatched()
-#           let kindVal = when declared(DT_DIR):
-#             if dent.d_type == DT_DIR: etDir
-#             elif dent.d_type == DT_REG: etFile
-#             elif dent.d_type == DT_LNK: etLink
-#             else: etFile
-#           else:
-#             etFile
-#
-#           if kindVal == etDir:
-#             if currentRelEmpty:
-#               childDirs.add(DirEntry(path: currentPathSlash & name, relPath: name, depth: entry.depth + 1))
-#             else:
-#               pathBuf.setLen(0)
-#               pathBuf.add(currentRelPath)
-#               pathBuf.add('/')
-#               pathBuf.add(name)
-#               childDirs.add(DirEntry(path: currentPathSlash & name, relPath: pathBuf, depth: entry.depth + 1))
-#
-#           if kindVal in ctx.cfg.types:
-#             let outPath = if ctx.cfg.absolute:
-#               currentPathSlash & name
-#             elif currentRelEmpty:
-#               name
-#             else:
-#               pathBuf.setLen(0)
-#               pathBuf.add(currentRelPath)
-#               pathBuf.add('/')
-#               pathBuf.add(name)
-#               pathBuf
-#             localMatches.add(MatchResult(
-#               path: outPath,
-#               relPath: outPath,
-#               absPath: currentPathSlash & name,
-#               name: if ctx.needResultName: name else: "",
-#               size: 0,
-#               mtime: times.fromUnix(0),
-#               kind: kindVal,
-#               fuzzyScore: -1
-#             ))
-#
-#         if childDirs.len > 0:
-#           args.queue.pushBatch(childDirs)
-#
-#         if localMatches.len >= 128:
-#           let added = args.results.addMatches(localMatches)
-#           localMatches.setLen(0)
-#           if added == 0 and args.results.isLimitReached():
-#             args.queue.signalShutdown()
-#             break
-#
-#     if localMatches.len > 0:
-#       discard args.results.addMatches(localMatches)
-
-  # proc runParallelSearchFastPath(cfg: Config; rootAbs: string;
-  #                                 spKind: SimplePatternKind; spCore: string;
-  #                                 cachedIC: bool; globalStart: times.Time): SearchResult =
-  #   result.stats.startTime = globalStart
-  #   let numWorkers = effectiveThreadCount(cfg)
-  #
-  #   var ctx = WorkerContext(
-  #     rootAbs: rootAbs,
-  #     cfg: cfg,
-  #     matcher: Matcher(),
-  #     ex: Excluder(),
-  #     giLines: @[],
-  #     useGi: false,
-  #     rootDev: -1,
-  #     contentRx: none(Regex),
-  #     cachedIC: cachedIC,
-  #     needInfo: false,
-  #     includeHidden: cfg.includeHidden,
-  #     needResultName: needsResultName(cfg),
-  #     matchAll: spKind == spkUniversal,
-  #     hasExcludes: false,
-  #     oneFileSystem: false,
-  #     spKind: spKind,
-  #     spCore: spCore
-  #   )
-  #
-  #   let queue = newWorkQueue()
-  #   let results = newResultCollector(cfg.limit)
-  #   let stats = newAtomicStats()
-  #
-  #   queue.push(DirEntry(path: rootAbs, relPath: "", depth: 0))
-  #
-  #   if numWorkers == 1:
-  #     var args = WorkerArgs(
-  #       ctx: addr ctx,
-  #       queue: queue,
-  #       results: results,
-  #       stats: stats,
-  #       workerId: 0
-  #     )
-  #     workerFastPathProc(args)
-  #   else:
-  #     var threads = newSeq[Thread[WorkerArgs]](numWorkers)
-  #     for i in 0..<numWorkers:
-  #       var args = WorkerArgs(
-  #         ctx: addr ctx,
-  #         queue: queue,
-  #         results: results,
-  #         stats: stats,
-  #         workerId: i
-  #       )
-  #       createThread(threads[i], workerFastPathProc, args)
-  #     for i in 0..<numWorkers:
-  #       joinThread(threads[i])
-  #
-  #   result.matches = results.getMatches()
-  #   result.stats = stats.toStats(globalStart, times.getTime())
-  #
-  #   queue.destroy()
-  #   results.destroy()
-  #   stats.destroy()
-
   proc runParallelSearch(cfg: Config; rootAbs: string; globalStart: times.Time): SearchResult =
     result.stats.startTime = globalStart
 
@@ -1169,11 +1167,6 @@ when compileOption("threads"):
     let includeHidden = cfg.includeHidden
     let needResultName = needsResultName(cfg)
 
-    var spKind: SimplePatternKind
-    var spCore = ""
-    # let useFastPath = canUseSimplePathStream(cfg) and parseSimplePattern(cfg, spKind, spCore)
-    let spCoreCmp = if cachedIC: spCore.toLowerAscii() else: spCore
-
     var ctx = WorkerContext(
       rootAbs: rootAbs,
       cfg: cfg,
@@ -1187,26 +1180,22 @@ when compileOption("threads"):
       needInfo: needInfo,
       includeHidden: includeHidden,
       needResultName: needResultName,
-      matchAll: matcher.matchAll,
       hasExcludes: cfg.excludes.len > 0,
-      oneFileSystem: cfg.oneFileSystem,
-      spKind: spKind,
-      spCore: spCoreCmp
+      oneFileSystem: cfg.oneFileSystem
     )
 
     let queue = newWorkQueue()
     let results = newResultCollector(cfg.limit)
     let stats = newAtomicStats()
 
-    queue.push(DirEntry(path: rootAbs, relPath: "", depth: 0))
+    queue.push(DirEntry(path: rootAbs, depth: 0))
 
     if numWorkers == 1:
       var args = WorkerArgs(
         ctx: addr ctx,
         queue: queue,
         results: results,
-        stats: stats,
-        workerId: 0
+        stats: stats
       )
       workerProc(args)
     else:
@@ -1216,8 +1205,7 @@ when compileOption("threads"):
           ctx: addr ctx,
           queue: queue,
           results: results,
-          stats: stats,
-          workerId: i
+          stats: stats
         )
         createThread(threads[i], workerProc, args)
       for i in 0..<numWorkers:

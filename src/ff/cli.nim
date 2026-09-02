@@ -81,7 +81,7 @@ type
     fdMode*: bool
 
 const
-  ProductVersion* = "2.3.0"
+  ProductVersion* = "2.4.0"
   Version* = "fastfind " & ProductVersion
   
   # note: these were in here and unused

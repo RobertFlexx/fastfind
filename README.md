@@ -2,20 +2,40 @@
 
 fastfind is designed to be a modern, feature-rich alternative to traditional tools like `find` and `fd`. It prioritizes flexibility and capability while still aiming for strong performance.
 
-### Full System Scan (root `/`)
+### Current controlled comparison (v2.4.0)
 
-| Command       | Time   | Files Found | Notes                           |
-| ------------- | ------ | ----------: | ------------------------------- |
-| `ff "*" /`    | ~0.53s |      ~1.09M | Fastest ff mode (single-thread) |
-| `ff "*" / -H` | ~0.71s |      ~1.39M | Includes hidden files           |
-| `fd . /`      | ~0.27s |      ~1.09M | Extremely optimized baseline    |
-| `fd . / -H`   | ~0.36s |      ~1.09M | Hidden files                    |
+Warm-cache results on Linux 6.18.48 with an Intel i7-9700, Nim 2.2.10 LTO
+builds, and `fd` 10.5.0. The synthetic tree contains 104,401 visible entries
+spread across 200 top-level directories; each value is the mean of 30
+Hyperfine runs.
+
+| Workload | fastfind 2.3.0 | fastfind 2.4.0 | fd 10.5.0 |
+| -------- | -------------: | -------------: | --------: |
+| List all entries to `/dev/null` | 36.8 ms | 22.2 ms | 22.8 ms |
+| Count all entries | 21.7 ms | 4.6 ms | 25.6 ms (`fd \| wc -l`) |
+
+On the same host, a more heterogeneous 759,587-entry `/usr` tree (10 runs)
+took 293.5 ms to list with fastfind versus 137.2 ms with fd. Count-only search
+took 66.5 ms with fastfind versus 141.5 ms with `fd | wc -l`. Tree shape,
+storage, cache state, and result density all matter, so these are comparison
+points rather than universal claims.
 
 ### Key Observations
 
-* `fd` is faster (about 2× for raw traversal)
-* `ff` finds slightly more files when using `-H`, due to differences in how hidden or system paths like `/proc` and `/sys` are handled
-* `ff` single-thread mode is the fastest mode. Parallel (`-j`) adds overhead for simple workloads
+* fastfind 2.4 cuts path-listing overhead by avoiding per-entry terminal checks
+  and unnecessary filename allocations.
+* Simple count-only searches adapt automatically: small trees remain serial,
+  while broad POSIX trees use disjoint worker-owned subtrees.
+* fd remains the stronger baseline for raw listing on large heterogeneous
+  trees; fastfind can be substantially faster when only a count is needed.
+
+Run the same comparison on your own data:
+
+```bash
+benchmarks/compare_fd.sh ./bin/fastfind /path/to/search 20
+```
+
+The harness requires Hyperfine and refuses to time unequal result sets.
 
 ---
 
@@ -98,15 +118,18 @@ This led to key optimizations:
 
 * universal `*` fast path
 * matcher bypass (`matchAll`)
+* direct matching against POSIX `dirent` names
 * pattern match before `stat`
 * early continue for non-matches
 * buffer reuse (avoid allocations)
 * buffered output (reduce syscalls)
-* local variable hoisting
+* one terminal check per streaming run
+* adaptive, allocation-local parallel counting
 
 The result:
 
-* about 2× speedup from initial versions
+* roughly 40% faster listing and 4.7× faster counting than v2.3.0 on the
+  synthetic release benchmark
 * competitive performance for a feature-rich tool
 * strong single-thread efficiency
 
@@ -118,6 +141,7 @@ Parallel mode exists, but:
 
 * it is not always faster
 * for simple traversal, it is often slower
+* broad count-only POSIX searches select it automatically
 
 Why:
 
@@ -133,12 +157,17 @@ Use `-j` when:
 * complex filtering
 * regex-heavy workloads
 * CPU-heavy per-file processing
+* forcing parallel count traversal on a filesystem without reliable directory
+  fan-out metadata
 
 ### When to avoid it
 
 * simple `*` or glob scans
 * full filesystem listing
 * lightweight queries
+
+Small count-only trees are kept serial automatically, even when the default
+adaptive mode is enabled. An explicit `-j N` still overrides that choice.
 
 ---
 
@@ -187,7 +216,7 @@ fastfind is about doing more with one command, without giving up too much perfor
 
 ---
 
-***[Changelog for 2.3.0](https://github.com/RobertFlexx/fastfind/blob/main/CHANGELOG.md)***
+***[Changelog for 2.4.0](https://github.com/RobertFlexx/fastfind/blob/main/CHANGELOG.md)***
 
 ---
 
@@ -601,13 +630,10 @@ engine has since replaced the path hot loop, parallel accounting, content
 buffers, Git status parsing, and JSON index. Do not treat these old numbers as
 current release measurements.
 
-Current regression snapshot (15,100 files, warm cache, 200 complete scans on
-the development host): path-only output took 1.13 s with fastfind versus 1.10 s
-with fd 10.1.0. Supplying `-j 8` remained 1.13 s because fastfind adaptively
-keeps path-only work on its lower-overhead stream. For metadata sorting, 200
-indexed queries took 3.08 s versus 6.26 s for live traversal. These numbers are
-dataset-specific; run the same commands on your own workload before drawing a
-broader conclusion.
+A later v2.1-era regression snapshot (15,100 files, warm cache, 200 complete
+scans) measured 1.13 s with fastfind and 1.10 s with fd 10.1.0. For metadata
+sorting, 200 indexed queries took 3.08 s versus 6.26 s for live traversal.
+These figures remain here only as historical context for the tables below.
 
 Benchmark dataset:
 

@@ -7,7 +7,6 @@ import core
 type
   DirEntry* = object
     path*: string
-    relPath*: string
     depth*: int
 
   WorkQueue* = ptr WorkQueueObj
@@ -48,20 +47,23 @@ proc newWorkQueue*(): WorkQueue =
 
 proc destroy*(q: WorkQueue) =
   if q != nil:
+    q.items = @[]
     deinitLock(q.lock)
     deallocShared(q)
 
-proc push*(q: WorkQueue, entry: DirEntry) =
+proc push*(q: WorkQueue, entry: sink DirEntry) =
   discard q.pendingCount.fetchAdd(1)
   acquire(q.lock)
-  q.items.add(entry)
+  q.items.add(move entry)
   release(q.lock)
 
-proc pushBatch*(q: WorkQueue, entries: openArray[DirEntry]) =
+proc pushBatch*(q: WorkQueue, entries: var seq[DirEntry]) =
   if entries.len == 0: return
   discard q.pendingCount.fetchAdd(entries.len)
   acquire(q.lock)
-  q.items.add(entries)
+  for entry in entries.mitems:
+    q.items.add(move entry)
+  entries.setLen(0)
   release(q.lock)
 
 proc tryPopBatch*(q: WorkQueue; maxCount: int): seq[DirEntry] =
@@ -76,19 +78,9 @@ proc tryPopBatch*(q: WorkQueue; maxCount: int): seq[DirEntry] =
   result.setLen(count)
   var i = 0
   while i < count:
-    result[i] = q.items[startIdx + (count - 1 - i)]
+    result[i] = move q.items[startIdx + (count - 1 - i)]
     inc i
   q.items.setLen(startIdx)
-  release(q.lock)
-
-proc isEmpty*(q: WorkQueue): bool =
-  acquire(q.lock)
-  result = q.items.len == 0
-  release(q.lock)
-
-proc len*(q: WorkQueue): int =
-  acquire(q.lock)
-  result = q.items.len
   release(q.lock)
 
 proc signalShutdown*(q: WorkQueue) =
@@ -104,9 +96,6 @@ proc isComplete*(q: WorkQueue): bool =
   # pendingCount tracks queued + in-flight directory work.
   q.pendingCount.load() == 0
 
-proc pendingCount*(q: WorkQueue): int =
-  q.pendingCount.load()
-
 proc newResultCollector*(limit: int = 0): ResultCollector =
   result = cast[ResultCollector](allocShared0(sizeof(ResultCollectorObj)))
   result.matches = @[]
@@ -116,6 +105,7 @@ proc newResultCollector*(limit: int = 0): ResultCollector =
 
 proc destroy*(rc: ResultCollector) =
   if rc != nil:
+    rc.matches = @[]
     deinitLock(rc.lock)
     deallocShared(rc)
 
@@ -152,11 +142,6 @@ proc getMatches*(rc: ResultCollector): seq[MatchResult] =
   result = rc.matches
   release(rc.lock)
 
-proc matchCount*(rc: ResultCollector): int =
-  acquire(rc.lock)
-  result = rc.matches.len
-  release(rc.lock)
-
 proc newAtomicStats*(): AtomicStats =
   result = cast[AtomicStats](allocShared0(sizeof(AtomicStatsObj)))
   result.visited.store(0)
@@ -171,16 +156,6 @@ proc newAtomicStats*(): AtomicStats =
 proc destroy*(s: AtomicStats) =
   if s != nil:
     deallocShared(s)
-
-proc incVisited*(s: AtomicStats) = discard s.visited.fetchAdd(1)
-proc incVisitedFiles*(s: AtomicStats) = discard s.visitedFiles.fetchAdd(1)
-proc incVisitedDirs*(s: AtomicStats) = discard s.visitedDirs.fetchAdd(1)
-proc incVisitedLinks*(s: AtomicStats) = discard s.visitedLinks.fetchAdd(1)
-proc incMatched*(s: AtomicStats) = discard s.matched.fetchAdd(1)
-proc incErrors*(s: AtomicStats) = discard s.errors.fetchAdd(1)
-proc incSkipped*(s: AtomicStats) = discard s.skipped.fetchAdd(1)
-proc addBytesRead*(s: AtomicStats, bytes: int64) = discard s.bytesRead.fetchAdd(bytes)
-proc matchedCount*(s: AtomicStats): int = s.matched.load()
 
 proc addStats*(s: AtomicStats; local: Stats) =
   ## Each worker keeps its own counters and merges them when it finishes. That
