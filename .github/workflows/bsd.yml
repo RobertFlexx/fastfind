@@ -15,6 +15,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: bsd-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'push' || github.event_name == 'pull_request' }}
+
 jobs:
   build:
     name: Build ${{ matrix.os }} amd64
@@ -31,11 +35,11 @@ jobs:
           ref: ${{ inputs.source_ref || github.sha }}
           persist-credentials: false
 
-      - name: Build and test on FreeBSD 14.4
+      - name: Build and test on FreeBSD 15.1
         if: matrix.os == 'freebsd'
         uses: vmactions/freebsd-vm@c46abacb49f09938ca4e1702d15d836285d694cc # v1
         with:
-          release: '14.4'
+          release: '15.1'
           arch: x86_64
           mem: 4096
           cpu: 2
@@ -53,11 +57,11 @@ jobs:
           prepare: sh .github/scripts/bsd-deps.sh openbsd
           run: sh .github/scripts/build-bsd.sh openbsd
 
-      - name: Build and test on NetBSD 10.1
+      - name: Build and test on NetBSD 11.0
         if: matrix.os == 'netbsd'
         uses: vmactions/netbsd-vm@c8a0d7ddb84619a7a8cc4e652efa7950b3fd9f92 # v1
         with:
-          release: '10.1'
+          release: '11.0'
           arch: x86_64
           mem: 4096
           cpu: 2
