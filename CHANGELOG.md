@@ -24,6 +24,8 @@
 
 - Pass shell filename placeholders as arguments rather than inserting path
   bytes into shell code, including quoted placeholders.
+- Reject Windows shell paths containing command metacharacters; structured
+  execution remains available for those names. Test this guard in Windows CI.
 - Create index refresh files exclusively with unpredictable names, preventing
   temporary symlinks from truncating an unrelated file.
 - Escape terminal controls, invalid UTF-8 and bidi controls in displayed paths;

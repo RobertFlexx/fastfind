@@ -104,3 +104,12 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or $result -notmatch 'ff\.nim') {
             throw "the Windows binary failed its regex smoke test"
           }
+
+          $fixture = Join-Path $env:RUNNER_TEMP 'fastfind-shell-test'
+          New-Item -ItemType Directory -Force $fixture | Out-Null
+          New-Item -ItemType File -Path (Join-Path $fixture 'bad&name.txt') | Out-Null
+          & .\fastfind-under-test.exe --fixed 'bad&name.txt' $fixture --exec-cmd 'echo {}' --shell
+          if ($LASTEXITCODE -ne 2) {
+            throw "unsafe Windows shell path was not rejected"
+          }
+          $global:LASTEXITCODE = 0

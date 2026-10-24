@@ -112,7 +112,9 @@ terminal when the selected path is redirected into a pipe.
 
 Bracketed paste is treated as text rather than a sequence of commands. Shell
 placeholders pass filenames as arguments, including when `{}` is surrounded
-by quotes. JSON output replaces invalid UTF-8 for display and includes
+by quotes. On Windows, shell actions reject paths containing shell
+metacharacters; use structured `--exec-cmd` arguments without `--shell` for
+those names. JSON output replaces invalid UTF-8 for display and includes
 Base64 `pathBytes`, `absPathBytes`, `relPathBytes` or `nameBytes` fields where
 needed to preserve the original bytes. `--print0` always preserves raw paths.
 

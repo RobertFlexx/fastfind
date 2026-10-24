@@ -1,6 +1,6 @@
 ## Paths are shell arguments, never text interpolated into executable code.
 import std/osproc
-when not defined(posix): import std/strutils
+when not defined(posix): import std/[strutils, os]
 
 proc shellPathScript*(command: string): string =
   var quote = '\0'
@@ -36,4 +36,10 @@ proc runShellForPath*(command, path: string): int =
     except CatchableError:
       result = 127
   else:
-    execShellCmd(command.replace("{}", quoteShell(path)))
+    # Windows argv quoting is not cmd.exe shell escaping. Fail closed for
+    # shell metacharacters; structured --exec-cmd arguments handle these paths.
+    if path.find({'&', '|', '<', '>', '^', '%', '!', '"', '(', ')', '\r', '\n'}) >= 0:
+      stderr.writeLine("fastfind: this Windows path requires --exec-cmd arguments without --shell")
+      return 2
+    let script = command.replace("\"{}\"", "{}").replace("'{}'", "{}")
+    execShellCmd(script.replace("{}", "\"" & path & "\""))

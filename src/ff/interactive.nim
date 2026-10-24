@@ -1192,7 +1192,7 @@ var pasteBuffer: string
 proc readByte(fd: cint; timeoutMs: int; ch: var char): int =
   when defined(posix):
     var descriptor = TPollfd(fd: fd, events: POLLIN)
-    let ready = poll(addr descriptor, Tnfds(1), timeoutMs)
+    let ready = poll(addr descriptor, Tnfds(1), cint(timeoutMs))
     if ready == 0: return 0
     if ready < 0:
       if errno == EINTR: return 0
