@@ -253,9 +253,15 @@ jobs:
           retention-days: 7
           compression-level: 0
 
+  build-bsd:
+    name: Build BSD binaries
+    uses: ./.github/workflows/bsd.yml
+    with:
+      source_ref: ${{ github.event.release.tag_name || inputs.tag }}
+
   publish:
     name: Attach binaries to ${{ github.event.release.tag_name || inputs.tag }}
-    needs: build
+    needs: [build, build-bsd]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -280,11 +286,17 @@ jobs:
             ff-darwin-amd64
             ff-darwin-arm64
             ff-windows-amd64.exe
+            ff-freebsd-amd64
+            ff-openbsd-amd64
+            ff-netbsd-amd64
             fastfind-linux-glibc-amd64.tar.gz
             fastfind-linux-glibc-arm64.tar.gz
             fastfind-darwin-amd64.tar.gz
             fastfind-darwin-arm64.tar.gz
             fastfind-windows-amd64.zip
+            fastfind-freebsd-amd64.tar.gz
+            fastfind-openbsd-amd64.tar.gz
+            fastfind-netbsd-amd64.tar.gz
           )
 
           for asset in "${expected[@]}"; do
