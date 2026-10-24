@@ -1,7 +1,7 @@
 ## Small binary index that can be read one record at a time.
 ## Roots are written once and entries keep only metadata plus a relative path,
 ## so a search mostly holds the matches it finds.
-import std/[os, times, strutils, options, locks]
+import std/[os, times, strutils, options, locks, tempfiles]
 import core, cli, matchers
 
 const
@@ -93,6 +93,7 @@ proc readVarUInt(f: File; value: var uint64): bool =
   while shift < 64:
     var b: uint8
     if not f.readByte(b): return false
+    if shift == 63 and b > 1: return false
     value = value or (uint64(b and 0x7f) shl shift)
     if (b and 0x80) == 0: return true
     shift += 7
@@ -136,7 +137,8 @@ proc readHeader(f: File; header: var IndexHeader): bool =
   header.roots = newSeqOfCap[string](int(rootCount))
   for _ in 0..<rootCount:
     var root: string
-    if not f.readString(root) or root.len == 0: return false
+    if not f.readString(root) or root.len == 0 or not root.isAbsolute or '\0' in root:
+      return false
     header.roots.add(root)
   true
 
@@ -158,7 +160,12 @@ proc readEntry(f: File; entry: var IndexEntry): bool =
   entry.kind = EntryType(kindByte)
   entry.size = int64(size)
   entry.mtime = int64(mtime)
-  entry.relPath.len > 0 and entry.relPath != "."
+  if entry.relPath.len == 0 or entry.relPath.isAbsolute or '\0' in entry.relPath:
+    return false
+  # An index is input, including when it supplies paths to --exec-cmd.
+  for component in entry.relPath.split(DirSep):
+    if component in ["", ".", ".."]: return false
+  true
 
 proc openIndex(header: var IndexHeader; f: var File): bool =
   if not open(f, getIndexPath(), fmRead): return false
@@ -194,10 +201,12 @@ proc rebuildIndex(paths: seq[string]; showProgress: bool) =
     raise newException(ValueError, "no readable directories to index")
   let destination = getIndexPath()
   createDir(destination.parentDir())
-  let tempPath = destination & ".tmp." & $getCurrentProcessId()
-  var f: File
-  if not open(f, tempPath, fmWrite):
-    raise newException(IOError, "cannot create index: " & tempPath)
+  # Exclusive creation prevents a predictable temporary symlink from
+  # truncating another file before the finished index is renamed.
+  let temporary = createTempFile(destination.extractFilename & ".", ".tmp",
+    destination.parentDir)
+  let tempPath = temporary.path
+  var f = temporary.cfile
   var succeeded = false
   try:
     f.writeHeader(roots, getTime().toUnix, 0)
@@ -282,11 +291,10 @@ proc passesExtensions(cfg: Config; path: string): bool =
 proc requestedRelPath(absPath: string; requestedRoots: seq[string];
                       relPath: var string): bool =
   for root in requestedRoots:
-    if absPath == root:
-      relPath = "."
-      return true
-    if absPath.startsWith(root & DirSep):
-      relPath = absPath[root.len + 1..^1]
+    if absPath == root: continue
+    if withinRoot(absPath, root):
+      let start = root.len + (if root[^1] == DirSep: 0 else: 1)
+      relPath = absPath[start..^1]
       return true
   false
 
@@ -299,7 +307,7 @@ proc indexCovers*(paths: seq[string]): bool =
     let requested = normalizedRoot(path)
     var covered = false
     for root in header.roots:
-      if requested == root or requested.startsWith(root & DirSep):
+      if withinRoot(requested, root):
         covered = true
         break
     if not covered: return false

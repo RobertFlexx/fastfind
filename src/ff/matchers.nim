@@ -70,7 +70,7 @@ proc globToRegex*(glob: string): string =
     else:
       result.add(escapeRe($c))
     inc i
-  result.add('$')
+  result.add("\\z")
 
 proc gitGlobBody(glob: string): string =
   ## Turn gitignore wildcards into regex. A single star stops at `/`, while
@@ -160,7 +160,7 @@ proc analyzeGlob(glob: string; ic: bool): OptGlob =
   
   let hasLead = glob[0] == '*'
   let hasTrail = glob[^1] == '*'
-  var hasMid = false
+  var hasMid = glob.find({'?', '[', ']'}) >= 0
   for i in 1..<glob.len-1:
     if glob[i] in {'*', '?', '[', ']'}:
       hasMid = true
@@ -168,7 +168,7 @@ proc analyzeGlob(glob: string; ic: bool): OptGlob =
   
   if hasMid:
     let rx = globToRegex(glob)
-    return OptGlob(kind: gkComplex, regex: re(rx, if ic: {reIgnoreCase} else: {}))
+    return OptGlob(kind: gkComplex, regex: re(rx, if ic: {reIgnoreCase, reDotAll} else: {reDotAll}))
   
   var core: string
   var kind: GlobKind
@@ -187,7 +187,7 @@ proc analyzeGlob(glob: string; ic: bool): OptGlob =
     core = glob
   else:
     let rx = globToRegex(glob)
-    return OptGlob(kind: gkComplex, regex: re(rx, if ic: {reIgnoreCase} else: {}))
+    return OptGlob(kind: gkComplex, regex: re(rx, if ic: {reIgnoreCase, reDotAll} else: {reDotAll}))
   
   OptGlob(kind: kind, pattern: if ic: core.toLowerAscii() else: core)
 
@@ -339,7 +339,8 @@ proc compile*(m: var Matcher) =
   m.optGlobs.setLen(0)
   m.matchAll = false
 
-  if m.mode == mmGlob and m.patterns.len == 1 and m.patterns[0] == "*":
+  if m.mode == mmGlob and m.patterns.len == 1 and m.patterns[0].len > 0 and
+      m.patterns[0].allCharsInSet({'*'}):
     m.matchAll = true
     return
 
@@ -354,8 +355,7 @@ proc compile*(m: var Matcher) =
     for p in m.patterns:
       var rxStr = p
       if m.fullMatch:
-        if not rxStr.startsWith("^"): rxStr = "^" & rxStr
-        if not rxStr.endsWith("$"): rxStr = rxStr & "$"
+        rxStr = "\\A(?:" & p & ")\\z"
       m.compiled.add(re(rxStr, if ic: {reIgnoreCase} else: {}))
   of mmFuzzy:
     for p in m.patterns:
@@ -446,11 +446,14 @@ proc anyMatch*(m: Matcher; baseName, fullRelPath: string): bool =
           if matchWithCase(m, og, target, target): return true
     false
   of mmRegex:
+    # Most walkers deliberately avoid allocating a basename. Regex matching
+    # needs that slice too, just like the optimized glob and fixed matchers.
+    let regexTarget = if useBaseSlice: fullRelPath[baseStart..^1] else: target
     for rx in m.compiled:
       if m.fullMatch:
-        if target.match(rx): return true
+        if regexTarget.match(rx): return true
       else:
-        if target.contains(rx): return true
+        if regexTarget.contains(rx): return true
     false
   of mmFuzzy:
     let t = if m.effectiveIC: target.toLowerAscii() else: target
@@ -471,7 +474,7 @@ proc compile*(e: var Excluder) =
   e.compiled.setLen(0)
   for p in e.patterns:
     let rxStr = globToRegex(p)
-    e.compiled.add(re(rxStr, if e.ignoreCase: {reIgnoreCase} else: {}))
+    e.compiled.add(re(rxStr, if e.ignoreCase: {reIgnoreCase, reDotAll} else: {reDotAll}))
 
 proc isExcluded*(e: Excluder; relPath: string): bool {.inline.} =
   for rx in e.compiled:

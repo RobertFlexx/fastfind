@@ -21,6 +21,7 @@ type
     matches*: seq[MatchResult]
     lock: Lock
     limit*: int
+    count: int
     limitReached: Atomic[bool]
 
   AtomicStats* = ptr AtomicStatsObj
@@ -136,6 +137,14 @@ proc addMatches*(rc: ResultCollector, ms: openArray[MatchResult]): int =
 
 proc isLimitReached*(rc: ResultCollector): bool =
   rc.limitReached.load()
+
+proc countMatch*(rc: ResultCollector): bool =
+  ## Only limited count searches synchronize accepted matches.
+  acquire(rc.lock)
+  result = rc.count < rc.limit
+  if result: inc rc.count
+  if rc.count >= rc.limit: rc.limitReached.store(true)
+  release(rc.lock)
 
 proc getMatches*(rc: ResultCollector): seq[MatchResult] =
   acquire(rc.lock)

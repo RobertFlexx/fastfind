@@ -1,222 +1,122 @@
-## Performance Benchmarks
+# fastfind 2.5.0
 
-fastfind is designed to be a modern, feature-rich alternative to traditional tools like `find` and `fd`. It prioritizes flexibility and capability while still aiming for strong performance.
+Fast file search with glob, regex, fuzzy and natural-language queries, content
+filters, Git awareness, compact indexes and an interactive terminal browser.
 
-### Current controlled comparison (v2.4.0)
+## Measured performance
 
-Warm-cache results on Linux 6.18.48 with an Intel i7-9700, Nim 2.2.10 LTO
-builds, and `fd` 10.5.0. The synthetic tree contains 104,401 visible entries
-spread across 200 top-level directories; each value is the mean of 30
-Hyperfine runs.
+Warm-cache Linux measurements on an Intel i7-9700 (8 cores), Nim 2.2.0,
+ORC, release optimizations and LTO; fd 10.5.0. The synthetic tree contains
+100,000 files in 2,200 directories. The mixed `/usr` tree contains 314,814
+visible entries. Listing writes to `/dev/null`; no indexes are used. The
+harness verifies identical filename multisets using NUL-delimited absolute
+paths before measuring, with hidden files and ignore rules disabled equally.
 
-| Workload | fastfind 2.3.0 | fastfind 2.4.0 | fd 10.5.0 |
-| -------- | -------------: | -------------: | --------: |
-| List all entries to `/dev/null` | 36.8 ms | 22.2 ms | 22.8 ms |
-| Count all entries | 21.7 ms | 4.6 ms | 25.6 ms (`fd \| wc -l`) |
+| Tree / workers | 2.4.0 | 2.5.0 | fd 10.5.0 |
+| --- | ---: | ---: | ---: |
+| Synthetic / 1 | 20.03 ms | 19.39 ms | 88.80 ms |
+| Synthetic / 8 | 19.88 ms | 3.77 ms | 18.73 ms |
+| `/usr` / 1 | 118.75 ms | 117.71 ms | 342.47 ms |
+| `/usr` / 8 | 118.62 ms | 26.39 ms | 53.90 ms |
 
-On the same host, a more heterogeneous 759,587-entry `/usr` tree (10 runs)
-took 293.5 ms to list with fastfind versus 137.2 ms with fd. Count-only search
-took 66.5 ms with fastfind versus 141.5 ms with `fd | wc -l`. Tree shape,
-storage, cache state, and result density all matter, so these are comparison
-points rather than universal claims.
+Values are medians of 30 synthetic-tree runs and 20 `/usr` runs, with three
+warmups and randomized command order. On these workloads, eight-thread
+listing is approximately **5× faster than fd on the synthetic tree** and
+**2× faster on `/usr`**. Single-thread listing also beats fd at the same
+thread count. These are measured workloads, not a guarantee for every tree,
+filesystem, cache state or combination of filters.
 
-### Key Observations
+Peak resident memory for eight-thread listing was **3.54 MiB** on the synthetic
+tree and **4.70 MiB** on `/usr`, versus fd's 8.36 MiB and 18.58 MiB. Memory is
+measured separately with GNU time, avoiding inherited Python verification
+buffers in child RSS readings. Count-only traversal does not collect results;
+eight-thread counts took 3.49 ms and 24.48 ms respectively.
 
-* fastfind 2.4 cuts path-listing overhead by avoiding per-entry terminal checks
-  and unnecessary filename allocations.
-* Simple count-only searches adapt automatically: small trees remain serial,
-  while broad POSIX trees use disjoint worker-owned subtrees.
-* fd remains the stronger baseline for raw listing on large heterogeneous
-  trees; fastfind can be substantially faster when only a count is needed.
-
-Run the same comparison on your own data:
+Reproduce the comparison (Python standard library and fd required):
 
 ```bash
-benchmarks/compare_fd.sh ./bin/fastfind /path/to/search 20
+nimble release_full
+benchmarks/compare_fd.sh ./bin/fastfind /path/to/tree 20
+python3 benchmarks/compare_fd.py ./bin/fastfind /usr 20 --threads 1 8 --json results.json
 ```
 
-The harness requires Hyperfine and refuses to time unequal result sets.
-
----
-
-## Why fd is fast (and deserves credit)
-
-fd is an extremely well-optimized tool written in Rust with:
-
-* A highly tuned filesystem walker (`ignore` crate)
-* Very low allocation overhead
-* Efficient use of OS directory APIs
-* Years of refinement and real-world usage
-
-For pure filename traversal, `fd` is genuinely hard to beat.
-
----
-
-## Why fastfind exists
-
-fastfind is not trying to replace fd. It is trying to extend what file search tools can do.
-
-Where fd focuses on speed and simplicity, ff focuses on:
-
-* Doing more in one command
-* Reducing the need for pipelines
-* Adding smarter, higher-level capabilities
-
----
-
-## What fastfind does differently
-
-fastfind aims to combine multiple tools into one:
-
-* `find` is powerful but complex
-* `fd` is fast and simple
-* `fzf` is great for filtering but not a crawler
-
-fastfind sits between them:
-
-* one command
-* more features
-* still reasonably fast
-
----
-
-## Strengths of fastfind
-
-fastfind holds its own while offering features that go beyond fd:
-
-* Built-in content search (`--contains`)
-  no grep pipeline needed
-
-* Natural language queries
-  `"python files modified this week"`
-  `"code files larger than 100kb"`
-
-* Fuzzy matching
-  no need for `fzf` in simple cases
-
-* Semantic code search
-  `--function`, `--class`, `--symbol`
-
-* Interactive mode
-  built-in selection UI with `:exec` and `:rm` commands
-
-* Index-based search (optional)
-  compact binary records, streaming reads, atomic refreshes
-
-* Compact native binary
-  PCRE1 is the only runtime library dependency of standard builds
-
----
-
-## Performance Philosophy
-
-fastfind is built around a simple idea:
-
-> Do the least amount of work possible per file.
-
-This led to key optimizations:
-
-* universal `*` fast path
-* matcher bypass (`matchAll`)
-* direct matching against POSIX `dirent` names
-* pattern match before `stat`
-* early continue for non-matches
-* buffer reuse (avoid allocations)
-* buffered output (reduce syscalls)
-* one terminal check per streaming run
-* adaptive, allocation-local parallel counting
-
-The result:
-
-* roughly 40% faster listing and 4.7× faster counting than v2.3.0 on the
-  synthetic release benchmark
-* competitive performance for a feature-rich tool
-* strong single-thread efficiency
-
----
-
-## Parallel Mode (`-j`)
-
-Parallel mode exists, but:
-
-* it is not always faster
-* for simple traversal, it is often slower
-* broad count-only POSIX searches select it automatically
-
-Why:
-
-* filesystem traversal is I/O-bound
-* thread coordination adds overhead
-* per-entry work is too small to benefit
-
-### When parallel helps
-
-Use `-j` when:
-
-* content search (`--contains`)
-* complex filtering
-* regex-heavy workloads
-* CPU-heavy per-file processing
-* forcing parallel count traversal on a filesystem without reliable directory
-  fan-out metadata
-
-### When to avoid it
-
-* simple `*` or glob scans
-* full filesystem listing
-* lightweight queries
-
-Small count-only trees are kept serial automatically, even when the default
-adaptive mode is enabled. An explicit `-j N` still overrides that choice.
-
----
-
-## When to use each tool
-
-| Scenario                       | Recommendation |
-| ------------------------------ | -------------- |
-| Pure speed (file listing)      | `fd`           |
-| Rich filtering or features     | `ff`           |
-| Content search (simple)        | `ff`           |
-| Content search (max speed)     | `fd + grep`    |
-| Fuzzy search without pipelines | `ff`           |
-| Interactive pipelines          | `fzf`          |
-
----
-
-## Vision
-
-fastfind is not trying to beat fd at its own game.
-
-Instead, the goal is:
-
-> A single, powerful search tool that reduces the need for chaining multiple tools together.
-
-The long-term vision:
-
-* close more of the performance gap where possible
-* keep the hot path efficient and predictable
-* expand higher-level search capabilities
-* make advanced queries easier and more natural
-* stay fast enough to feel instant in real workflows
-
-In short:
-
-* fd = speed and simplicity
-* ff = capability, flexibility, and still fast
-
----
-
-## Final Take
-
-* ff is engineered to stay near fd on path traversal
-* ff adds richer filtering, NLP, semantic, interactive, and index workflows
-
-fastfind is about doing more with one command, without giving up too much performance.
-
----
-
-***[Changelog for 2.4.0](https://github.com/RobertFlexx/fastfind/blob/main/CHANGELOG.md)***
+See [benchmark details](benchmarks/RESULTS.md) for dataset construction, exact
+build commands, measurements and limitations.
+
+## Parallel search and memory
+
+Simple POSIX filename listing and counting adapt to tree size. Small searches
+finish without starting workers; larger searches use up to eight. `-j 1`
+forces serial traversal and `-j N` selects up to 32 workers. Explicit parallel
+regex, exclusion, metadata and content searches stream plain results too.
+
+Each streaming worker buffers 64 KiB of output. A slow pipe applies backpressure
+without collecting the entire result set. Sorting, ranking, selection and JSON
+arrays collect the results they need. `--count` avoids retaining match objects,
+including parallel content searches. Following symbolic links and hierarchical
+Git ignore rules currently use the serial walker to preserve their semantics.
+
+## Natural-language search
+
+Queries run locally, without a model download or network request:
+
+```bash
+ff 'find python files modified in the past three weeks'
+ff --query 'ten largest PDF files in my downloads'
+ff --query 'files between one and five megabytes'
+ff --query 'python files named main or config excluding vendor'
+ff --query 'files containing TODO and FIXME'
+ff --query "files that don't contain 'secret key'"
+ff --query 'files modified yesterday' --explain
+```
+
+The parser understands language/format alternatives, filename phrases,
+prefixes, suffixes and exact names; content phrases, AND/OR and regex;
+negative content, paths and exclusions; written numbers, size ranges,
+calendar windows, relative times, ordering and limits. `newest` and `largest`
+sort results without imposing an arbitrary age or size cutoff. `yesterday`
+excludes today. Specific formats such as PDF remain specific formats.
+
+Use `--query` to explicitly interpret a sentence and `--explain` to inspect
+the resulting filters. Explicit `--glob`, `--regex` and `--fixed` patterns
+bypass automatic NLP detection, allowing literal multiword filenames.
+Unrecognized words become a name constraint or produce a warning. This is
+an offline grammar with documented clauses; it cannot infer arbitrary intent,
+understand image contents, or express every cross-field Boolean sentence.
+
+## Interactive browser
+
+```bash
+ff --interactive '*' /path/to/project
+```
+
+The browser opens the requested root, uses Unicode cell widths, adapts its
+preview to terminal size and buffers screen writes. Metadata and bounded
+64 KiB previews are cached; FIFOs and device files cannot block previews.
+Recursive searches run in a cancellable background worker in threaded builds,
+and accept natural-language queries. The alternate screen and terminal state
+are restored on exit, Ctrl+C, SIGINT and SIGTERM. UI output stays on the
+terminal when the selected path is redirected into a pipe.
+
+| Key | Action |
+| --- | --- |
+| Arrows or j/k/h/l | Navigate; Enter enters a directory or returns a file |
+| / | Fuzzy or glob filter in the current results |
+| g | Recursive search below the current directory; Esc cancels |
+| Tab | Go to path, with Tab completion |
+| Space, v, V | Toggle selection, select visible, clear selection |
+| p, i, . | Preview, details, hidden files |
+| s, r | Sort field, reverse order |
+| : | Commands; :rm asks before deleting files |
+| ?, q | Help, quit |
+
+Bracketed paste is treated as text rather than a sequence of commands. Shell
+placeholders pass filenames as arguments, including when `{}` is surrounded
+by quotes. JSON output replaces invalid UTF-8 for display and includes
+Base64 `pathBytes`, `absPathBytes`, `relPathBytes` or `nameBytes` fields where
+needed to preserve the original bytes. `--print0` always preserves raw paths.
+
+***[Changelog for 2.5.0](https://github.com/RobertFlexx/fastfind/blob/main/CHANGELOG.md)***
 
 ---
 
@@ -481,7 +381,7 @@ ff "*" /          # Explicit glob (fastest for ff)
 ff --glob "*" /   # Same, more explicit
 ```
 
-Note: ff's single-thread mode is actually faster than parallel mode (`-j`) for simple traversal. Use default (no `-j`) for best results.
+Simple filename searches adapt automatically. Use `-j 1` to force serial traversal or `-j N` to select a worker count.
 
 ## Quick start
 
@@ -687,7 +587,7 @@ System specs:
 ### Historical summary
 
 - **In the v2.1 baseline, fd was faster** - particularly for broad traversal
-- **ff single-thread** - faster than ff parallel mode (use default, no `-j`)
+- In that historical version, serial traversal beat parallel traversal. Version 2.5.0 uses the adaptive engine described above.
 - **ff built-in content search** - simpler than fd+grep pipeline (but slower)
 - **find** - surprisingly competitive for simple patterns
 

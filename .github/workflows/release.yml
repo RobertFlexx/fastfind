@@ -130,6 +130,8 @@ jobs:
             -d:release \
             -d:usePcreHeader \
             --opt:speed \
+            --passC:-flto \
+            --passL:-flto \
             "--passC:-I${pcre_prefix}/include" \
             "--passL:${pcre_archive}" \
             "-o:dist/${ASSET_NAME}" \
@@ -177,6 +179,8 @@ jobs:
             -d:release `
             -d:usePcreHeader `
             --opt:speed `
+            --passC:-flto `
+            --passL:-flto `
             '--passC:-DPCRE_STATIC' `
             '--passC:-Wno-error=incompatible-pointer-types' `
             "--passC:-I$($pcreRoot.Replace('\', '/'))/include" `

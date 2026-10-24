@@ -1,26 +1,19 @@
-import std/[os, terminal, times as times, strutils, algorithm, re, osproc]
-import core, cli, search, fuzzy_match, matchers
+import std/[os, terminal, times as times, strutils, algorithm, re, sets]
+when compileOption("threads"): import std/[atomics, locks]
+import core, cli, search, fuzzy_match, matchers, tui_text, content, shellcmd, nlp
+from ansi import terminalText
 
 when defined(posix):
   import std/posix
+  import posix/termios
+  type SignalHandler = proc(signal: cint) {.noconv.}
+  proc swapSignal(signal: cint; handler: SignalHandler): SignalHandler {.
+    importc: "signal", header: "<signal.h>".}
 
-  const
-    ICANON = 2.cuint
-    ECHO = 8.cuint
-    VMIN = 6
-    VTIME = 5
-    TCSANOW = 0.cint
+var stopSignalNumber {.volatile.}: cint
 
-  type
-    Termios {.importc: "struct termios", header: "<termios.h>", pure.} = object
-      c_iflag: cuint
-      c_oflag: cuint
-      c_cflag: cuint
-      c_lflag: cuint
-      c_cc: array[32, uint8]
-
-  proc tcgetattr(fd: cint; t: ptr Termios): cint {.importc, header: "<termios.h>".}
-  proc tcsetattr(fd: cint; actions: cint; t: ptr Termios): cint {.importc, header: "<termios.h>".}
+proc stopOnSignal(signal: cint) {.noconv, stackTrace: off.} =
+  stopSignalNumber = signal
 
 type
   RawTerminalState = object
@@ -35,12 +28,15 @@ proc readInput(fd: cint; buffer: pointer; count: int): int {.inline.} =
 
 proc enableRawTerminal(fd: cint): RawTerminalState =
   when defined(posix):
-    discard tcgetattr(fd, addr result.attrs)
+    if tcGetAttr(fd, addr result.attrs) != 0:
+      raise newException(IOError, "interactive mode requires a terminal on stdin")
     var raw = result.attrs
-    raw.c_lflag = raw.c_lflag and not ICANON and not ECHO
-    raw.c_cc[VMIN] = 0
-    raw.c_cc[VTIME] = 1
-    discard tcsetattr(fd, TCSANOW, addr raw)
+    raw.c_lflag = raw.c_lflag and not Cflag(ICANON or ECHO or ISIG or IEXTEN)
+    raw.c_iflag = raw.c_iflag and not Cflag(IXON or ICRNL)
+    raw.c_cc[VMIN] = char(0)
+    raw.c_cc[VTIME] = char(1)
+    if tcSetAttr(fd, TCSANOW, addr raw) != 0:
+      raise newException(IOError, "cannot enable interactive terminal input")
   else:
     stderr.writeLine("Interactive mode is not supported on Windows")
     quit(1)
@@ -48,7 +44,21 @@ proc enableRawTerminal(fd: cint): RawTerminalState =
 proc restoreTerminal(fd: cint; state: RawTerminalState) =
   when defined(posix):
     var attrs = state.attrs
-    discard tcsetattr(fd, TCSANOW, addr attrs)
+    discard tcSetAttr(fd, TCSANOW, addr attrs)
+
+when compileOption("threads"):
+  type
+    BackgroundSearch = ptr BackgroundSearchObj
+    BackgroundSearchObj = object
+      cfg: Config
+      control: SearchControl
+      completed: Atomic[bool]
+      response: SearchResult
+      error: string
+      worker: Thread[BackgroundSearch]
+      lock: Lock
+      changed: Cond
+      released: bool
 
 type
   Mode = enum
@@ -68,6 +78,10 @@ type
     size: int64
     mtime: times.Time
     selected: bool
+    executable: bool
+    permissions: string
+    lowerName: string
+    displayName: string
 
   TUIState = object
     mode: Mode
@@ -105,7 +119,12 @@ type
     confirmTarget: string
     pendingDelete: seq[string]
     yankPath: string
-    lastJump: char
+    previewKey: string
+    previewLines: seq[string]
+    inputFd: cint
+    terminalState: RawTerminalState
+    when compileOption("threads"):
+      searchJob: BackgroundSearch
 
 const
   ColorHeader = "\x1b[48;5;236m\x1b[38;5;252m"
@@ -141,29 +160,41 @@ const
   ]
 
 proc applyFilter(state: var TUIState)
+proc stopGlobalSearch(state: var TUIState)
+
+var screenBuffer = newStringOfCap(32 * 1024)
+var screenFile: File = stdout
+
+proc screenWrite(value: string) = screenBuffer.add(value)
+
+proc flushScreen() =
+  if screenBuffer.len > 0:
+    screenFile.write(screenBuffer)
+    screenBuffer.setLen(0)
+  screenFile.flushFile()
 
 proc hideCur() =
-  stdout.write("\x1b[?25l")
+  screenWrite("\x1b[?25l")
 
 proc showCur() =
-  stdout.write("\x1b[?25h")
+  screenWrite("\x1b[?25h")
 
 proc gotoXY(x, y: int) =
-  stdout.write("\x1b[" & $y & ";" & $x & "H")
+  screenWrite("\x1b[" & $y & ";" & $x & "H")
 
 proc clearScr() =
-  stdout.write("\x1b[2J\x1b[H")
+  screenWrite("\x1b[2J\x1b[H")
 
 proc clearLn() =
-  stdout.write("\x1b[2K")
+  screenWrite("\x1b[2K")
 
 # proc clearToEOL() =
-#   stdout.write("\x1b[K")
+#   screenWrite("\x1b[K")
 
 proc initState(cfg: Config): TUIState =
   result.mode = modeBrowse
   result.prevMode = modeBrowse
-  result.cwd = absolutePath(".")
+  result.cwd = absolutePath(if cfg.paths.len > 0: cfg.paths[0] else: ".")
   result.entries = @[]
   result.filtered = @[]
   result.cursor = 0
@@ -174,14 +205,14 @@ proc initState(cfg: Config): TUIState =
   result.message = ""
   result.messageTime = times.getTime()
   result.messageType = "info"
-  result.showHidden = false
+  result.showHidden = cfg.includeHidden
   result.showPreview = true
   result.showDetails = true
   result.sortBy = "name"
   result.sortReverse = false
   result.running = true
   result.selectedPaths = @[]
-  result.history = @[absolutePath(".")]
+  result.history = @[result.cwd]
   result.historyIndex = 0
   result.bookmarks = @[]
   result.width = terminalWidth()
@@ -195,7 +226,6 @@ proc initState(cfg: Config): TUIState =
   result.confirmAction = ""
   result.confirmTarget = ""
   result.yankPath = ""
-  result.lastJump = ' '
 
   let bookmarkFile = getHomeDir() / ".config" / "fastfind" / "bookmarks"
   if fileExists(bookmarkFile):
@@ -225,24 +255,16 @@ proc setMessage(state: var TUIState; msg: string; msgType: string = "info") =
   state.messageTime = times.getTime()
 
 proc truncateLeft(s: string; maxLen: int): string =
-  if s.len <= maxLen:
-    return s
-  return "..." & s[s.len - maxLen + 3 .. ^1]
+  clipText(s, maxLen, left = true)
 
 proc truncateRight(s: string; maxLen: int): string =
-  if s.len <= maxLen:
-    return s
-  return s[0 ..< maxLen - 3] & "..."
+  clipText(s, maxLen)
 
 proc padRight(s: string; width: int): string =
-  if s.len >= width:
-    return s[0 ..< width]
-  return s & repeat(' ', width - s.len)
+  fitText(s, width)
 
 proc padLeft(s: string; width: int): string =
-  if s.len >= width:
-    return s[0 ..< width]
-  return repeat(' ', width - s.len) & s
+  fitText(s, width, right = true)
 
 proc formatSize(size: int64): string =
   if size < 0:
@@ -269,54 +291,26 @@ proc formatTime(t: times.Time): string =
   except CatchableError:
     return "           "
 
-proc isExecutable(path: string): bool =
-  when defined(posix):
-    try:
-      let info = getFileInfo(path)
-      return fpUserExec in info.permissions or
-             fpGroupExec in info.permissions or
-             fpOthersExec in info.permissions
-    except CatchableError:
-      return false
-  else:
-    return false
-
 proc getFileIcon(entry: FileEntry): string =
-  if entry.kind == etDir:
-    return "📁 "
-  if entry.kind == etLink:
-    return "🔗 "
-
+  if entry.kind == etDir: return "▸ "
+  if entry.kind == etLink: return "↗ "
+  if entry.executable: return "* "
   let ext = entry.name.splitFile.ext.toLowerAscii
   case ext
-  of ".nim", ".py", ".rs", ".c", ".cpp", ".h", ".go", ".js", ".ts":
-    return "📄 "
-  of ".md", ".txt", ".rst", ".doc", ".docx", ".pdf":
-    return "📝 "
-  of ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".svg", ".webp":
-    return "🖼  "
-  of ".mp4", ".mkv", ".avi", ".mov", ".webm":
-    return "🎬 "
-  of ".mp3", ".wav", ".flac", ".ogg", ".m4a":
-    return "🎵 "
-  of ".zip", ".tar", ".gz", ".bz2", ".xz", ".7z", ".rar":
-    return "📦 "
-  of ".sh", ".bash", ".zsh", ".fish":
-    return "⚙  "
-  of ".json", ".yaml", ".yml", ".toml", ".xml", ".ini", ".conf":
-    return "🔧 "
-  of ".git":
-    return "🌿 "
-  else:
-    if isExecutable(entry.path):
-      return "⚡ "
-    return "   "
+  of ".nim", ".py", ".rs", ".c", ".cpp", ".h", ".go", ".js", ".ts": "λ "
+  of ".md", ".txt", ".rst": "≡ "
+  of ".json", ".yaml", ".yml", ".toml", ".xml", ".ini", ".conf": "⚙ "
+  else: "· "
 
 proc loadDirectory(state: var TUIState) =
+  stopGlobalSearch(state)
   state.entries = @[]
   state.filtered = @[]
   state.cursor = 0
   state.scroll = 0
+  state.globalMode = false
+  state.previewKey = ""
+  let selected = state.selectedPaths.toHashSet
 
   if state.cwd != "/":
     var parent: FileEntry
@@ -342,7 +336,9 @@ proc loadDirectory(state: var TUIState) =
       entry.name = name
       entry.path = path
       entry.relPath = name
-      entry.selected = path in state.selectedPaths
+      entry.selected = path in selected
+      entry.lowerName = name.toLowerAscii()
+      entry.displayName = safeText(name)
 
       case kind
       of pcFile:
@@ -353,7 +349,11 @@ proc loadDirectory(state: var TUIState) =
         entry.kind = etLink
 
       try:
-        let info = getFileInfo(path)
+        let info = getFileInfo(path, followSymlink = false)
+        entry.executable = (info.permissions * {fpUserExec, fpGroupExec, fpOthersExec}) != {}
+        entry.permissions = (if fpUserRead in info.permissions: "r" else: "-") &
+          (if fpUserWrite in info.permissions: "w" else: "-") &
+          (if fpUserExec in info.permissions: "x" else: "-")
         entry.size = info.size
         entry.mtime = info.lastWriteTime
       except CatchableError:
@@ -418,101 +418,177 @@ proc loadDirectory(state: var TUIState) =
   state.applyFilter()
 
 proc applyFilter(state: var TUIState) =
-  state.filtered = @[]
-
+  state.filtered.setLen(0)
+  state.cursor = 0
+  state.scroll = 0
   if state.query.len == 0:
-    for i in 0 ..< state.entries.len:
-      state.filtered.add(i)
+    for i in 0 ..< state.entries.len: state.filtered.add(i)
     return
 
   let queryLower = state.query.toLowerAscii()
-  var scored: seq[tuple[score: int, idx: int]] = @[]
-
+  let wildcard = queryLower.find({'*', '?', '['}) >= 0
+  var pattern: Regex
+  if wildcard:
+    try: pattern = re(globToRegex(queryLower))
+    except CatchableError: return
+  var scored = newSeqOfCap[tuple[score: int, idx: int]](state.entries.len)
   for i, entry in state.entries:
-    if entry.name == "..":
-      scored.add((-1000, i))
-      continue
-
-    let nameLower = entry.name.toLowerAscii()
-
-    if queryLower.contains("*") or queryLower.contains("?"):
-      let pattern = queryLower.replace(".", "\\.").replace("*", ".*").replace("?", ".")
-      try:
-        if nameLower.match(re(pattern)):
-          scored.add((0, i))
-      except CatchableError:
-        if nameLower.contains(queryLower.replace("*", "").replace("?", "")):
-          scored.add((50, i))
+    if entry.name == "..": continue
+    if wildcard:
+      if entry.lowerName.match(pattern): state.filtered.add(i)
     else:
-      let score = fuzzyMatch(queryLower, nameLower)
-      if score >= 0:
-        scored.add((score, i))
+      let score = fuzzyMatch(queryLower, entry.lowerName)
+      if score >= 0: scored.add((score, i))
+  if not wildcard:
+    scored.sort(proc(a, b: tuple[score: int, idx: int]): int =
+      result = cmp(a.score, b.score)
+      if result == 0: result = cmp(a.idx, b.idx))
+    for item in scored: state.filtered.add(item.idx)
 
-  scored.sort(proc(a, b: tuple[score: int, idx: int]): int = cmp(a.score, b.score))
+when compileOption("threads"):
+  proc detachedConfig(cfg: Config): Config =
+    # Isolate all managed strings before starting the thread. Nim's ORC
+    # reference counts are not atomic; the UI may edit its query concurrently.
+    result = cfg
+    for field in fields(result):
+      when field is string:
+        var copy = newString(field.len)
+        if field.len > 0: copyMem(addr copy[0], unsafeAddr field[0], field.len)
+        field = move copy
+      elif field is seq[string]:
+        var copy = newSeq[string](field.len)
+        for i in 0..<field.len:
+          copy[i] = newString(field[i].len)
+          if field[i].len > 0:
+            copyMem(addr copy[i][0], unsafeAddr field[i][0], field[i].len)
+        field = move copy
 
-  for item in scored:
-    state.filtered.add(item.idx)
+  proc searchInBackground(job: BackgroundSearch) {.thread, gcsafe.} =
+    try: job.response = runSearchCollect(job.cfg, job.control)
+    except CatchableError as e: job.error = e.msg
+    finally:
+      acquire(job.lock)
+      job.completed.store(true)
+      broadcast(job.changed)
+      while not job.released: wait(job.changed, job.lock)
+      release(job.lock)
 
-  if state.cursor >= state.filtered.len:
-    state.cursor = max(0, state.filtered.len - 1)
-  state.scroll = 0
+proc stopGlobalSearch(state: var TUIState) =
+  when compileOption("threads"):
+    let job = state.searchJob
+    if job != nil:
+      job.control.cancel()
+      acquire(job.lock)
+      while not job.completed.load(): wait(job.changed, job.lock)
+      reset(job.response)
+      reset(job.error)
+      job.released = true
+      broadcast(job.changed)
+      release(job.lock)
+      joinThread(job.worker)
+      job.control.destroy()
+      reset(job.cfg)
+      deinitCond(job.changed)
+      deinitLock(job.lock)
+      deallocShared(job)
+      state.searchJob = nil
+  state.globalSearching = false
+
+proc refreshGlobalView(state: var TUIState) =
+  state.entries.setLen(0)
+  let selected = state.selectedPaths.toHashSet
+  for entry in state.globalResults:
+    if state.typeFilter == "f" and entry.kind != etFile: continue
+    if state.typeFilter == "d" and entry.kind != etDir: continue
+    if state.typeFilter == "l" and entry.kind != etLink: continue
+    var visible = entry
+    visible.selected = entry.path in selected
+    state.entries.add(visible)
+  let key = state.sortBy
+  let reverse = state.sortReverse
+  state.entries.sort(proc(a, b: FileEntry): int =
+    if a.kind == etDir and b.kind != etDir: return -1
+    if b.kind == etDir and a.kind != etDir: return 1
+    case key
+    of "size": result = cmp(a.size, b.size)
+    of "time": result = cmp(a.mtime, b.mtime)
+    of "ext": result = cmpIgnoreCase(a.name.splitFile.ext, b.name.splitFile.ext)
+    else: result = cmpIgnoreCase(a.name, b.name)
+    if result == 0: result = cmpIgnoreCase(a.name, b.name)
+    if reverse: result = -result)
+  state.applyFilter()
+
+proc acceptGlobalResults(state: var TUIState; response: SearchResult) =
+  state.globalResults.setLen(0)
+  let selected = state.selectedPaths.toHashSet
+  for m in response.matches:
+    let name = if m.name.len > 0: m.name else: extractFilename(m.absPath)
+    state.globalResults.add(FileEntry(name: name, path: m.absPath,
+      relPath: m.relPath, lowerName: name.toLowerAscii(), displayName: safeText(name),
+      kind: m.kind, size: m.size, mtime: m.mtime, selected: m.absPath in selected))
+  state.query = ""
+  state.refreshGlobalView()
+  state.globalSearching = false
+  state.previewKey = ""
+  state.setMessage("Found " & $state.entries.len & " results" &
+    (if state.entries.len == 500: " · first 500 shown" else: ""), "success")
+
+proc pollGlobalSearch(state: var TUIState): bool =
+  when compileOption("threads"):
+    let job = state.searchJob
+    if job != nil and job.completed.load():
+      var response = SearchResult(matches: ownedCopy(job.response.matches), stats: job.response.stats)
+      var error = newString(job.error.len)
+      if error.len > 0: copyMem(addr error[0], unsafeAddr job.error[0], error.len)
+      state.stopGlobalSearch()
+      state.acceptGlobalResults(response)
+      if error.len > 0: state.setMessage(error, "error")
+      return true
+  false
 
 proc runGlobalSearch(state: var TUIState) =
-  state.globalResults = @[]
-  state.globalSearching = true
-
+  state.stopGlobalSearch()
   var searchCfg = state.baseConfig
-
-  let home = getHomeDir()
-  searchCfg.paths = @[home, "/tmp", "/etc", "/usr/local", "/opt"]
-
+  searchCfg.paths = @[state.cwd]
   searchCfg.patterns = @[state.globalPattern]
   searchCfg.limit = 500
   searchCfg.includeHidden = state.showHidden
-  searchCfg.maxDepth = 10
-
-  searchCfg.excludes = @[
-    "*.git*", "*node_modules*", "*__pycache__*", "*.cache*",
-    "*/.local/share/Trash*", "*/snap/*", "*/.npm/*", "*/.cargo/registry/*",
-    "*/proc/*", "*/sys/*", "*/dev/*", "*/run/*"
-  ]
-
-  if state.globalPattern.startsWith("*."):
+  searchCfg.outputMode = omLong
+  searchCfg.countOnly = false
+  searchCfg.execCmd = ""
+  searchCfg.fuzzyMode = false
+  searchCfg.fullMatch = false
+  searchCfg.pathMode = pmBaseName
+  if isNaturalLanguageQuery(state.globalPattern):
+    searchCfg.patterns.setLen(0)
+    applyParsedQuery(searchCfg, parseNaturalQuery(state.globalPattern))
+    if searchCfg.patterns.len == 0: searchCfg.patterns = @["*"]
+    searchCfg.limit = if searchCfg.limit > 0: min(500, searchCfg.limit) else: 500
+    searchCfg.countOnly = false
+  elif state.globalPattern.find({'*', '?', '['}) >= 0:
     searchCfg.matchMode = mmGlob
-    searchCfg.pathMode = pmBaseName
-  elif state.globalPattern.contains("*") or state.globalPattern.contains("?"):
-    searchCfg.matchMode = mmGlob
-    searchCfg.pathMode = pmBaseName
   else:
     searchCfg.matchMode = mmFixed
-    searchCfg.pathMode = pmBaseName
     searchCfg.ignoreCase = true
-
-  try:
-    let res = runSearchCollect(searchCfg)
-
-    for m in res.matches:
-      var entry: FileEntry
-      entry.name = m.name
-      entry.path = m.absPath
-      entry.relPath = m.relPath
-      entry.kind = m.kind
-      entry.size = m.size
-      entry.mtime = m.mtime
-      entry.selected = m.absPath in state.selectedPaths
-      state.globalResults.add(entry)
-  except CatchableError:
-    discard
-
-  state.globalSearching = false
-  state.entries = state.globalResults
-  state.filtered = @[]
-  for i in 0 ..< state.entries.len:
-    state.filtered.add(i)
-
+  state.globalSearching = true
+  state.entries.setLen(0)
+  state.filtered.setLen(0)
   state.cursor = 0
   state.scroll = 0
-  state.setMessage("Found " & $state.entries.len & " results", "success")
+  state.setMessage("Searching below " & state.cwd & " · Esc cancels", "info")
+  when compileOption("threads"):
+    let job = cast[BackgroundSearch](allocShared0(sizeof(BackgroundSearchObj)))
+    initLock(job.lock)
+    initCond(job.changed)
+    job.cfg = detachedConfig(searchCfg)
+    job.control = newSearchControl()
+    state.searchJob = job
+    createThread(job.worker, searchInBackground, job)
+  else:
+    try: state.acceptGlobalResults(runSearchCollect(searchCfg))
+    except CatchableError as e:
+      state.globalSearching = false
+      state.setMessage(e.msg, "error")
 
 proc currentEntry(state: TUIState): FileEntry =
   if state.filtered.len == 0:
@@ -523,10 +599,10 @@ proc currentEntry(state: TUIState): FileEntry =
   return FileEntry()
 
 proc listHeight(state: TUIState): int =
-  return state.height - 4
+  return max(1, state.height - 5)
 
 proc previewWidth(state: TUIState): int =
-  if state.showPreview:
+  if state.showPreview and state.width >= 88 and state.height >= 12:
     return (state.width * 2) div 5
   return 0
 
@@ -544,58 +620,47 @@ proc adjustScroll(state: var TUIState) =
 
 proc drawBox(x, y, w, h: int; title: string = "") =
   gotoXY(x, y)
-  stdout.write(ColorBorder)
-  stdout.write("┌")
+  screenWrite(ColorBorder)
+  screenWrite("┌")
   if title.len > 0:
-    stdout.write("┤ " & title & " ├")
-    stdout.write(repeat("─", w - title.len - 6))
+    screenWrite("┤ " & title & " ├")
+    screenWrite(repeat("─", w - title.len - 6))
   else:
-    stdout.write(repeat("─", w - 2))
-  stdout.write("┐")
+    screenWrite(repeat("─", w - 2))
+  screenWrite("┐")
 
   for i in 1 ..< h - 1:
     gotoXY(x, y + i)
-    stdout.write("│")
-    gotoXY(x + w - 1, y + i)
-    stdout.write("│")
+    screenWrite("│" & repeat(' ', max(0, w - 2)) & "│")
 
   gotoXY(x, y + h - 1)
-  stdout.write("└" & repeat("─", w - 2) & "┘")
-  stdout.write(ColorReset)
+  screenWrite("└" & repeat("─", w - 2) & "┘")
+  screenWrite(ColorReset)
 
 proc safeDisplay(value: string): string
 
 proc drawHeader(state: TUIState) =
   gotoXY(1, 1)
-  stdout.write(ColorHeader)
-
-  var modeIndicator = ""
-  if state.globalMode:
-    modeIndicator = " 🌍 GLOBAL "
-
-  let cwdDisplay = truncateLeft(safeDisplay(state.cwd), state.width - 30)
-
-  let modeStr = case state.mode
+  let mode = case state.mode
     of modeBrowse: "BROWSE"
-    of modeSearch: "SEARCH"
-    of modeCommand: "CMD"
-    of modeGlobalSearch: "GLOBAL"
-    of modeGoto: "GOTO"
-    of modeFilter: "FILTER"
+    of modeSearch: "FILTER"
+    of modeCommand: "COMMAND"
+    of modeGlobalSearch: "RECURSIVE"
+    of modeGoto: "GO TO"
+    of modeFilter: "TYPE"
     of modeConfirm: "CONFIRM"
-
-  let sortIndicator = " [" & state.sortBy & (if state.sortReverse: "↓" else: "↑") & "]"
-  let filterIndicator = if state.typeFilter.len > 0: " [type:" & state.typeFilter & "]" else: ""
-
-  let leftPart = " " & cwdDisplay
-  let rightPart = modeIndicator & filterIndicator & sortIndicator & " [" & modeStr & "] "
-  let padding = state.width - leftPart.len - rightPart.len
-
-  stdout.write(leftPart)
-  if padding > 0:
-    stdout.write(repeat(' ', padding))
-  stdout.write(rightPart)
-  stdout.write(ColorReset)
+  let badge = " " & mode & " "
+  let brand = " fastfind "
+  let pathWidth = max(0, state.width - brand.len - badge.len - 1)
+  screenWrite(ColorHeader & ColorBold & brand & ColorReset & ColorHeader)
+  screenWrite(fitText(truncateLeft(safeDisplay(state.cwd), pathWidth), pathWidth))
+  screenWrite(ColorPrompt & badge & ColorReset)
+  gotoXY(1, 2)
+  let sort = state.sortBy & (if state.sortReverse: " ↓" else: " ↑")
+  let scope = if state.globalMode: "recursive" else: "directory"
+  let title = " " & scope & " · " & $state.filtered.len & " results · " & sort &
+    (if state.showHidden: " · hidden" else: "")
+  screenWrite(ColorDim & fitText(title, state.width) & ColorReset)
 
 proc highlightMatch(name: string; query: string; baseColor: string): string =
   if query.len == 0:
@@ -615,86 +680,46 @@ proc highlightMatch(name: string; query: string; baseColor: string): string =
 
   result = baseColor & result
 
-proc safeDisplay(value: string): string =
-  ## Clean filenames before putting them on screen.
-  result = newStringOfCap(value.len)
-  for c in value:
-    if c >= ' ' and c != '\x7f': result.add(c)
-    else: result.add('?')
+proc safeDisplay(value: string): string = safeText(value)
 
 proc drawEntry(state: TUIState; entry: FileEntry; y: int; width: int; isSelected: bool; isCursor: bool) =
   gotoXY(1, y)
-  clearLn()
-
-  var baseColor = ColorFile
-  case entry.kind
-  of etDir:
-    baseColor = ColorDir
-  of etLink:
-    baseColor = ColorLink
-  of etFile:
-    if isExecutable(entry.path):
-      baseColor = ColorExec
-
+  let details = state.showDetails and width >= 55
+  let detailsWidth = if details: 22 else: 0
+  let nameWidth = max(0, width - 5 - detailsWidth)
+  var baseColor = case entry.kind
+    of etDir: ColorDir
+    of etLink: ColorLink
+    of etFile: (if entry.executable: ColorExec else: ColorFile)
   if isCursor:
-    stdout.write(ColorSelected)
-    baseColor = ""
-
-  var prefix = "  "
-  if entry.selected:
-    prefix = "● "
-  if isCursor:
-    prefix = "▶ "
-    if entry.selected:
-      prefix = "◉ "
-
-  stdout.write(prefix)
-
-  let icon = getFileIcon(entry)
-  stdout.write(icon)
-
-  let detailsWidth = if state.showDetails: 22 else: 0
-  let nameWidth = width - 5 - icon.len - detailsWidth
-  let displayName = safeDisplay(entry.name)
-  let name = truncateRight(displayName, nameWidth)
-
-  if state.query.len > 0 and entry.name != "..":
-    stdout.write(highlightMatch(padRight(name, nameWidth), state.query, baseColor))
-  else:
-    stdout.write(baseColor & padRight(name, nameWidth))
-
-  if state.showDetails:
-    if not isCursor:
-      stdout.write(ColorSize)
-
-    if entry.kind == etDir and entry.name != "..":
-      stdout.write(padLeft("<DIR>", 8))
-    elif entry.name == "..":
-      stdout.write(padLeft("", 8))
-    else:
-      stdout.write(formatSize(entry.size))
-
-    stdout.write(" ")
-
-    if not isCursor:
-      stdout.write(ColorTime)
-
-    if entry.name != "..":
-      stdout.write(formatTime(entry.mtime))
-
-  stdout.write(ColorReset)
+    screenWrite(ColorSelected)
+    baseColor = ColorSelected
+  let marker = if isCursor: "› " elif entry.selected: "● " else: "  "
+  screenWrite(marker & baseColor & getFileIcon(entry))
+  let display = if entry.displayName.len > 0: entry.displayName else: safeDisplay(entry.name)
+  let name = padRight(truncateRight(display, nameWidth), nameWidth)
+  screenWrite(highlightMatch(name, state.query, baseColor))
+  if details:
+    screenWrite((if isCursor: ColorSelected else: ColorSize))
+    let size = if entry.name == "..": "" elif entry.kind == etDir: "dir" else: formatSize(entry.size).strip()
+    screenWrite(padLeft(size, 8) & "  ")
+    screenWrite(padRight(if entry.name == "..": "" else: formatTime(entry.mtime), 11))
+  screenWrite(" " & ColorReset)
 
 proc drawList(state: TUIState) =
   let h = listHeight(state)
   let w = listWidth(state)
 
   for i in 0 ..< h:
-    let y = 2 + i
+    let y = 3 + i
     let idx = state.scroll + i
 
     if idx >= state.filtered.len:
       gotoXY(1, y)
-      clearLn()
+      screenWrite(repeat(' ', w))
+      if state.filtered.len == 0 and i == 1:
+        gotoXY(3, y)
+        screenWrite(ColorDim & truncateRight(if state.globalSearching: "Searching… Esc cancels" else: "No matches. Esc clears the filter.", max(0, w - 4)) & ColorReset)
       continue
 
     let entryIdx = state.filtered[idx]
@@ -706,282 +731,202 @@ proc drawList(state: TUIState) =
 
     drawEntry(state, entry, y, w, isSelected, isCursor)
 
-proc drawPreview(state: TUIState) =
-  if not state.showPreview:
-    return
-
-  let pw = previewWidth(state)
-  let px = listWidth(state) + 1
-  let h = listHeight(state)
-
-  for i in 0 ..< h:
-    gotoXY(px, 2 + i)
-    stdout.write(ColorBorder & "│" & ColorReset)
-    stdout.write(repeat(' ', pw - 1))
-
-  let entry = currentEntry(state)
-  if entry.name.len == 0:
-    return
-
-  gotoXY(px + 2, 2)
-  stdout.write(ColorBold)
-  stdout.write(truncateRight(safeDisplay(entry.name), pw - 4))
-  stdout.write(ColorReset)
-
-  gotoXY(px + 2, 3)
-  stdout.write(ColorDim)
-  stdout.write(truncateRight(safeDisplay(entry.path), pw - 4))
-  stdout.write(ColorReset)
-
+proc loadPreview(state: var TUIState; entry: FileEntry) =
+  let key = entry.path & "\0" & $entry.size & "\0" & $entry.mtime.toUnix
+  if key == state.previewKey: return
+  state.previewKey = key
+  state.previewLines.setLen(0)
+  if entry.name.len == 0: return
   if entry.kind == etDir:
-    gotoXY(px + 2, 5)
-    stdout.write(ColorPreview & "Directory" & ColorReset)
-
+    state.previewLines.add("Directory")
     var count = 0
-    var dirCount = 0
-    var fileCount = 0
     try:
       for kind, path in walkDir(entry.path):
+        if count >= 128: break
+        state.previewLines.add((if kind in {pcDir, pcLinkToDir}: "▸ " else: "· ") & safeDisplay(extractFilename(path)))
         inc count
-        if kind == pcDir:
-          inc dirCount
-        else:
-          inc fileCount
-        if count > 500:
-          break
-    except CatchableError:
-      discard
-
-    gotoXY(px + 2, 6)
-    let countStr = $dirCount & " dirs, " & $fileCount & " files"
-    stdout.write(ColorPreview & countStr & ColorReset)
+      if count == 128: state.previewLines.add("… first 128 entries")
+    except CatchableError: state.previewLines.add("Cannot read directory")
     return
-
   if entry.kind == etLink:
-    gotoXY(px + 2, 5)
-    stdout.write(ColorPreview & "Symbolic Link" & ColorReset)
-    try:
-      let target = expandSymlink(entry.path)
-      gotoXY(px + 2, 6)
-      stdout.write(ColorPreview & "-> " & truncateRight(safeDisplay(target), pw - 7) & ColorReset)
-    except CatchableError:
-      discard
+    state.previewLines.add("Symbolic link")
+    try: state.previewLines.add("→ " & safeDisplay(expandSymlink(entry.path)))
+    except CatchableError: state.previewLines.add("Target unavailable")
     return
-
-  if entry.kind != etFile:
-    return
-
-  gotoXY(px + 2, 5)
-  stdout.write(ColorDim & formatSize(entry.size) & " | " & formatTime(entry.mtime) & ColorReset)
-
   var f: File
-  if not open(f, entry.path, fmRead):
-    gotoXY(px + 2, 7)
-    stdout.write(ColorError & "Cannot read file" & ColorReset)
+  if not openRegularFile(f, entry.path):
+    state.previewLines.add("Preview unavailable for this file")
     return
-
   defer: close(f)
+  # Both bytes and lines are bounded. readLine() can allocate gigabytes for a
+  # single minified or binary line and can block indefinitely on FIFOs.
+  var data = newString(64 * 1024)
+  let n = f.readBuffer(addr data[0], data.len)
+  data.setLen(n)
+  if '\0' in data:
+    state.previewLines.add("Binary file · preview disabled")
+    return
+  var start = 0
+  for i in 0..<data.len:
+    if data[i] == '\n':
+      state.previewLines.add(safeDisplay(data[start..<i].replace("\t", "  ")))
+      start = i + 1
+      if state.previewLines.len >= 128: break
+  if state.previewLines.len < 128 and start < data.len:
+    state.previewLines.add(safeDisplay(data[start..^1].replace("\t", "  ")))
+  if n == 0: state.previewLines.add("Empty file")
+  if n == 64 * 1024: state.previewLines.add("… preview limited to 64 KiB")
 
-  var lineNum = 0
-  let maxLines = h - 8
-  let maxWidth = pw - 4
-
-  for line in f.lines:
-    if lineNum >= maxLines:
-      break
-
-    gotoXY(px + 2, 7 + lineNum)
-
-    var displayLine = line.replace("\t", "  ")
-    var isBinary = false
-    for ch in displayLine:
-      if ord(ch) < 32 and ch notin ['\t', '\n', '\r']:
-        isBinary = true
-        break
-
-    if isBinary:
-      gotoXY(px + 2, 7)
-      stdout.write(ColorDim & "[Binary file]" & ColorReset)
-      return
-
-    stdout.write(ColorPreview)
-    stdout.write(truncateRight(displayLine, maxWidth))
-    stdout.write(ColorReset)
-    inc lineNum
+proc drawPreview(state: var TUIState) =
+  let pw = previewWidth(state)
+  if pw == 0: return
+  let px = listWidth(state) + 1
+  let h = listHeight(state)
+  for i in 0..<h:
+    gotoXY(px, 3 + i)
+    screenWrite(ColorBorder & "│" & ColorReset & repeat(' ', pw - 1))
+  let entry = currentEntry(state)
+  if entry.name.len == 0: return
+  state.loadPreview(entry)
+  gotoXY(px + 2, 3)
+  screenWrite(ColorBold & truncateRight(safeDisplay(entry.name), pw - 4) & ColorReset)
+  gotoXY(px + 2, 4)
+  screenWrite(ColorDim & truncateRight(safeDisplay(entry.path), pw - 4) & ColorReset)
+  for i in 0..<min(state.previewLines.len, max(0, h - 4)):
+    gotoXY(px + 2, 7 + i)
+    screenWrite(ColorPreview & truncateRight(state.previewLines[i], pw - 4) & ColorReset)
 
 proc drawStatusBar(state: TUIState) =
   gotoXY(1, state.height - 1)
-  stdout.write(ColorStatus)
-  clearLn()
-
-  let selectedCount = state.selectedPaths.len
-  let totalCount = state.filtered.len
-  let cursorPos = if totalCount > 0: state.cursor + 1 else: 0
-
-  var parts: seq[string] = @[]
-
-  if selectedCount > 0:
-    parts.add($selectedCount & " selected")
-
-  parts.add($cursorPos & "/" & $totalCount)
-
-  if state.globalMode:
-    parts.add("GLOBAL")
-
-  if state.showHidden:
-    parts.add("hidden")
-
-  if state.typeFilter.len > 0:
-    parts.add("type:" & state.typeFilter)
-
-  let left = " " & parts.join(" │ ")
-
+  let total = state.filtered.len
+  let position = if total > 0: state.cursor + 1 else: 0
+  let selected = if state.selectedPaths.len > 0: " · " & $state.selectedPaths.len & " selected" else: ""
   let entry = currentEntry(state)
-  var right = ""
-  if entry.name.len > 0 and entry.name != "..":
-    let perms = try:
-      let info = getFileInfo(entry.path)
-      var p = ""
-      if fpUserRead in info.permissions: p.add("r") else: p.add("-")
-      if fpUserWrite in info.permissions: p.add("w") else: p.add("-")
-      if fpUserExec in info.permissions: p.add("x") else: p.add("-")
-      p
-    except CatchableError:
-      "---"
-    right = perms & " │ " & formatSize(entry.size).strip() & " │ " & formatTime(entry.mtime).strip() & " "
-
-  let padding = state.width - left.len - right.len
-  stdout.write(left)
-  if padding > 0:
-    stdout.write(repeat(' ', padding))
-  stdout.write(right)
-  stdout.write(ColorReset)
+  let left = " " & $position & " / " & $total & selected
+  let right = if state.width >= 65 and entry.name.len > 0 and entry.name != "..":
+    (if entry.permissions.len > 0: entry.permissions & " · " else: "") & formatSize(entry.size).strip() & " " else: ""
+  screenWrite(ColorStatus & fitText(left, max(0, state.width - textWidth(right))) & right & ColorReset)
 
 proc drawPrompt(state: TUIState) =
   gotoXY(1, state.height)
-  clearLn()
-
+  var prompt = ""
+  var input = ""
+  var color = ColorPrompt
   case state.mode
   of modeBrowse:
     let elapsed = (times.getTime() - state.messageTime).inSeconds
     if state.message.len > 0 and elapsed < 5:
-      let color = case state.messageType
+      color = case state.messageType
         of "error": ColorError
         of "success": ColorSuccess
         of "warning": ColorWarning
         else: ColorPrompt
-      stdout.write(color & state.message & ColorReset)
+      prompt = safeDisplay(state.message)
     else:
-      stdout.write(ColorDim & "? help │ / search │ : command │ g global │ q quit" & ColorReset)
-  of modeSearch:
-    stdout.write(ColorPrompt & "search: " & ColorReset)
-    stdout.write(state.query)
-    stdout.write(ColorDim & "█" & ColorReset)
-  of modeGlobalSearch:
-    stdout.write(ColorPrompt & "global search (*, ? supported): " & ColorReset)
-    stdout.write(state.globalPattern)
-    stdout.write(ColorDim & "█" & ColorReset)
-  of modeCommand:
-    stdout.write(ColorPrompt & ":" & ColorReset)
-    stdout.write(state.commandLine)
-    stdout.write(ColorDim & "█" & ColorReset)
-  of modeGoto:
-    stdout.write(ColorPrompt & "goto: " & ColorReset)
-    stdout.write(state.gotoPath)
-    stdout.write(ColorDim & "█" & ColorReset)
-  of modeFilter:
-    stdout.write(ColorPrompt & "filter type (f=file, d=dir, l=link, Enter=clear): " & ColorReset)
+      prompt = "/ filter  g recursive  Space select  : command  ? help  q quit"
+      color = ColorDim
+  of modeSearch: prompt = " / "; input = state.query
+  of modeGlobalSearch: prompt = " find / "; input = state.globalPattern
+  of modeCommand: prompt = " : "; input = state.commandLine
+  of modeGoto: prompt = " go / "; input = state.gotoPath
+  of modeFilter: prompt = " Type: f file · d directory · l link · Enter all · Esc cancel"
   of modeConfirm:
-    stdout.write(ColorWarning & state.confirmAction & " " & state.confirmTarget & "? (y/n) " & ColorReset)
-
-  stdout.flushFile()
+    prompt = safeDisplay(state.confirmAction & " " & state.confirmTarget) & "? y/n"
+    color = ColorWarning
+  if input.len > 0 or state.mode in {modeSearch, modeGlobalSearch, modeCommand, modeGoto}:
+    let available = max(0, state.width - textWidth(prompt) - 2)
+    prompt &= truncateLeft(safeDisplay(input), available) & "▏"
+  screenWrite(color & fitText(prompt, max(0, state.width - 1)) & ColorReset)
 
 proc drawBookmarks(state: TUIState) =
-  let bw = 50
-  let bh = min(state.bookmarks.len + 4, state.height - 4)
-  let bx = (state.width - bw) div 2
-  let by = (state.height - bh) div 2
+  if state.width < 24 or state.height < 7: return
+  let bw = min(58, state.width - 2)
+  let bh = min(state.bookmarks.len + 5, state.height - 2)
+  let bx = max(1, (state.width - bw) div 2 + 1)
+  let by = max(1, (state.height - bh) div 2 + 1)
 
   drawBox(bx, by, bw, bh, "Bookmarks")
 
   if state.bookmarks.len == 0:
     gotoXY(bx + 2, by + 2)
-    stdout.write(ColorDim & "No bookmarks. Press 'b' to add current dir." & ColorReset)
+    screenWrite(ColorDim & truncateRight("Press b to bookmark the current directory", bw - 4) & ColorReset)
   else:
     for i, bm in state.bookmarks:
       if i >= bh - 4:
         break
       gotoXY(bx + 2, by + 2 + i)
-      stdout.write(ColorPrompt & $(i + 1) & ColorReset & " " & truncateRight(bm, bw - 6))
+      screenWrite(ColorPrompt & $(i + 1) & ColorReset & " " & truncateRight(safeDisplay(bm), bw - 6))
 
   gotoXY(bx + 2, by + bh - 2)
-  stdout.write(ColorDim & "1-9 jump │ d delete │ Esc close" & ColorReset)
+  screenWrite(ColorDim & truncateRight("1-9 jump · Esc close", bw - 4) & ColorReset)
 
-proc drawHelp(state: TUIState; fd: cint) =
+proc readByte(fd: cint; timeoutMs: int; ch: var char): int
+
+proc drawHelp(state: var TUIState; fd: cint) =
   clearScr()
-  stdout.write(ColorHeader & " fastfind interactive mode " & ColorReset & "\n\n")
+  let help = [
+    "FASTFIND  /  keyboard shortcuts",
+    "",
+    "NAVIGATE   j/k or ↑/↓    move cursor",
+    "           Enter / →    enter directory or choose file",
+    "           h / ←        parent directory",
+    "           Home / End   first / last result",
+    "           Ctrl+U / D   page up / down",
+    "           [ / ]        back / forward",
+    "           Tab          go to path (Tab completes)",
+    "",
+    "SEARCH     /            fuzzy or glob filter",
+    "           g            recursive search below current path",
+    "           Esc          clear filter / cancel",
+    "",
+    "SELECT     Space        toggle selection and move",
+    "           v / V        select visible / clear selection",
+    "",
+    "VIEW       p / i        preview / details",
+    "           . / s / r    hidden files / sort / reverse",
+    "           b / B        bookmark / show bookmarks",
+    "           R            refresh",
+    "",
+    "COMMAND    :cd PATH     change directory",
+    "           :exec CMD    run command; {} is the quoted path",
+    "           :rm          confirm permanent file deletion",
+    "",
+    "QUIT       q / Ctrl+C   exit"
+  ]
+  for i in 0..<min(help.len, max(0, state.height - 2)):
+    gotoXY(2, i + 1)
+    screenWrite((if i == 0: ColorPrompt & ColorBold else: ColorFile) &
+      truncateRight(help[i], max(0, state.width - 3)) & ColorReset)
+  gotoXY(2, state.height)
+  screenWrite(ColorDim & truncateRight("Press any key to return", max(0, state.width - 3)) & ColorReset)
+  flushScreen()
+  var ch: char
+  while stopSignalNumber == 0:
+    let status = readByte(fd, 100, ch)
+    if status < 0 or (status > 0 and ch == '\x03'):
+      state.running = false
+      break
+    if status > 0: break
 
-  stdout.write(ColorBold & "Navigation" & ColorReset & "\n")
-  stdout.write("  j/↓         Move down          k/↑         Move up\n")
-  stdout.write("  l/→/Enter   Enter directory    h/←         Parent directory\n")
-  stdout.write("  g           Top                G           Bottom\n")
-  stdout.write("  Ctrl+D      Page down          Ctrl+U      Page up\n")
-  stdout.write("  [           History back       ]           History forward\n")
-  stdout.write("  ~           Home directory     /           Root directory\n")
-  stdout.write("  1-9         Quick jump dirs    Tab         Goto path\n")
-  stdout.write("\n")
-
-  stdout.write(ColorBold & "Search & Filter" & ColorReset & "\n")
-  stdout.write("  /           Local search       Esc         Clear search\n")
-  stdout.write("  g           Toggle global      f           Filter by type\n")
-  stdout.write("  Supports: fuzzy, *.ext, file??.txt patterns\n")
-  stdout.write("\n")
-
-  stdout.write(ColorBold & "Selection" & ColorReset & "\n")
-  stdout.write("  Space       Toggle select      v           Select all\n")
-  stdout.write("  V           Clear selection    Enter       Confirm & exit\n")
-  stdout.write("\n")
-
-  stdout.write(ColorBold & "View & Sort" & ColorReset & "\n")
-  stdout.write("  .           Toggle hidden      p           Toggle preview\n")
-  stdout.write("  i           Toggle details     s           Cycle sort\n")
-  stdout.write("  r           Reverse sort\n")
-  stdout.write("\n")
-
-  stdout.write(ColorBold & "Actions" & ColorReset & "\n")
-  stdout.write("  y           Yank path          Enter       Open/select\n")
-  stdout.write("  b           Add bookmark       B           Show bookmarks\n")
-  stdout.write("  R           Refresh            :           Command mode\n")
-  stdout.write("\n")
-
-  stdout.write(ColorBold & "Commands (:)" & ColorReset & "\n")
-  stdout.write("  :cd PATH    Change directory   :q          Quit\n")
-  stdout.write("  :h          Toggle hidden      :sort NAME  Set sort\n")
-  stdout.write("  :exec CMD   Run cmd on files  :rm         Delete file(s)\n")
-  stdout.write("  (use {} in exec cmd for path, e.g. :exec rm {})\n")
-  stdout.write("\n")
-
-  stdout.write(ColorDim & "Press any key to continue..." & ColorReset)
-  stdout.flushFile()
-
-  var dummy: char
-  while readInput(fd, addr dummy, 1) <= 0:
-    sleep(50)
-
-proc render(state: TUIState) =
+proc render(state: var TUIState) =
+  if state.width < 24 or state.height < 7:
+    clearScr()
+    screenWrite(truncateRight("Resize terminal · q quits", max(0, state.width - 1)))
+    flushScreen()
+    return
   hideCur()
   drawHeader(state)
   drawList(state)
   drawPreview(state)
   drawStatusBar(state)
   drawPrompt(state)
-  stdout.flushFile()
+  flushScreen()
 
 proc navigateTo(state: var TUIState; path: string) =
   var newPath = path
-  if newPath.startsWith("~"):
-    newPath = getHomeDir() / newPath[1..^1]
-  newPath = absolutePath(newPath)
+  if newPath == "~": newPath = getHomeDir()
+  elif newPath.startsWith("~/"): newPath = getHomeDir() / newPath[2..^1]
+  newPath = absolutePath(newPath, state.cwd)
 
   if not dirExists(newPath):
     state.setMessage("Not a directory: " & path, "error")
@@ -1030,7 +975,7 @@ proc enterDirectory(state: var TUIState) =
   if entry.name.len == 0:
     return
 
-  if entry.kind == etDir:
+  if entry.kind == etDir or (entry.kind == etLink and dirExists(entry.path)):
     navigateTo(state, entry.path)
 
 proc selectEntry(state: var TUIState) =
@@ -1059,8 +1004,11 @@ proc toggleSelectAndMove(state: var TUIState) =
     adjustScroll(state)
 
 proc selectAll(state: var TUIState) =
-  for i, entry in state.entries:
-    if entry.name != ".." and entry.path notin state.selectedPaths:
+  var selected = state.selectedPaths.toHashSet
+  for i in state.filtered:
+    let entry = state.entries[i]
+    if entry.name != ".." and entry.path notin selected:
+      selected.incl(entry.path)
       state.selectedPaths.add(entry.path)
       state.entries[i].selected = true
 
@@ -1072,9 +1020,8 @@ proc clearSelection(state: var TUIState) =
 proc toggleHidden(state: var TUIState) =
   state.showHidden = not state.showHidden
   if state.globalMode:
-    state.globalResults = @[]
-    state.entries = @[]
-    state.filtered = @[]
+    if state.globalPattern.len > 0: runGlobalSearch(state)
+    else: state.mode = modeGlobalSearch
   else:
     loadDirectory(state)
   state.setMessage(if state.showHidden: "Showing hidden files" else: "Hiding hidden files", "info")
@@ -1093,21 +1040,21 @@ proc cycleSort(state: var TUIState) =
   of "ext": state.sortBy = "name"
   else: state.sortBy = "name"
 
-  if not state.globalMode:
-    loadDirectory(state)
+  if state.globalMode: refreshGlobalView(state)
+  else: loadDirectory(state)
   state.setMessage("Sort by: " & state.sortBy, "info")
 
 proc reverseSort(state: var TUIState) =
   state.sortReverse = not state.sortReverse
-  if not state.globalMode:
-    loadDirectory(state)
+  if state.globalMode: refreshGlobalView(state)
+  else: loadDirectory(state)
 
 proc toggleGlobalMode(state: var TUIState) =
   state.globalMode = not state.globalMode
   if state.globalMode:
     state.mode = modeGlobalSearch
     state.globalPattern = ""
-    state.setMessage("Global search enabled - search entire filesystem", "info")
+    state.setMessage("Recursive search below " & state.cwd, "info")
   else:
     state.mode = modeBrowse
     loadDirectory(state)
@@ -1170,16 +1117,18 @@ proc executeCommand(state: var TUIState; cmd: string) =
       let s = parts[1].toLowerAscii()
       if s in ["name", "size", "time", "ext"]:
         state.sortBy = s
-        if not state.globalMode:
-          loadDirectory(state)
+        if state.globalMode: refreshGlobalView(state)
+        else: loadDirectory(state)
         state.setMessage("Sort by: " & s, "info")
   of "filter":
-    if parts.len > 1:
+    if parts.len > 1 and parts[1].len > 0:
       state.typeFilter = parts[1][0..0]
-      loadDirectory(state)
+      if state.globalMode: refreshGlobalView(state)
+      else: loadDirectory(state)
     else:
       state.typeFilter = ""
-      loadDirectory(state)
+      if state.globalMode: refreshGlobalView(state)
+      else: loadDirectory(state)
   of "exec":
     if parts.len > 1:
       let cmd = parts[1]
@@ -1194,12 +1143,23 @@ proc executeCommand(state: var TUIState; cmd: string) =
       if targets.len == 0:
         state.setMessage("No file selected", "warning")
         return
-      for path in targets:
-        let fullCmd = cmd.replace("{}", quoteShell(path))
-        let code = execShellCmd(fullCmd)
-        if code != 0:
-          state.setMessage("Command failed with exit code: " & $code, "error")
-          return
+      restoreTerminal(state.inputFd, state.terminalState)
+      screenWrite(ColorReset & "\x1b[?2004l\x1b[?1049l")
+      showCur()
+      flushScreen()
+      var exitCode = 0
+      try:
+        for path in targets:
+          exitCode = runShellForPath(cmd, path)
+          if exitCode != 0: break
+      finally:
+        discard enableRawTerminal(state.inputFd)
+        screenWrite("\x1b[?1049h\x1b[?2004h")
+        clearScr()
+        state.previewKey = ""
+      if exitCode != 0:
+        state.setMessage("Command failed with exit code: " & $exitCode, "error")
+        return
       state.setMessage("Executed: " & cmd & " on " & $targets.len & " file(s)", "success")
     else:
       state.setMessage("Usage: exec <command> (use {} for path)", "warning")
@@ -1221,74 +1181,109 @@ proc executeCommand(state: var TUIState; cmd: string) =
   else:
     state.setMessage("Unknown command: " & parts[0], "error")
 
-proc readKey(fd: cint): tuple[kind: string, ch: char] =
-  var buf: array[8, char]
-  let n = readInput(fd, addr buf[0], 1)
+type Key = object
+  kind: string
+  ch: char
+  text: string
 
-  if n <= 0:
-    return ("none", '\0')
+var pasteActive = false
+var pasteBuffer: string
 
-  let ch = buf[0]
+proc readByte(fd: cint; timeoutMs: int; ch: var char): int =
+  when defined(posix):
+    var descriptor = TPollfd(fd: fd, events: POLLIN)
+    let ready = poll(addr descriptor, Tnfds(1), timeoutMs)
+    if ready == 0: return 0
+    if ready < 0:
+      if errno == EINTR: return 0
+      return -1
+    if (descriptor.revents and (POLLHUP or POLLERR or POLLNVAL)) != 0: return -1
+    let n = readInput(fd, addr ch, 1)
+    if n <= 0: return -1
+    return 1
+  else: -1
 
+proc readKey(fd: cint): Key =
+  var ch: char
+  let status = readByte(fd, 100, ch)
+  if status < 0: return Key(kind: "eof")
+  if status == 0: return Key(kind: "none")
+  if pasteActive:
+    while true:
+      pasteBuffer.add(ch)
+      if pasteBuffer.endsWith("\x1b[201~"):
+        pasteActive = false
+        pasteBuffer.setLen(pasteBuffer.len - 6)
+        result = Key(kind: "paste", text: safeDisplay(pasteBuffer).replace("\\x0a", " ").replace("\\x0d", " "))
+        pasteBuffer.setLen(0)
+        return
+      # Retain a bounded prefix and enough trailing bytes to detect the end.
+      if pasteBuffer.len > 65542: pasteBuffer.delete(65536..65536)
+      let next = readByte(fd, 20, ch)
+      if next < 0: return Key(kind: "eof")
+      if next == 0: return Key(kind: "none")
   if ch == '\x1b':
-    var seqBuf: array[8, char]
-    let n2 = readInput(fd, addr seqBuf[0], 2)
-    if n2 == 2 and seqBuf[0] == '[':
-      case seqBuf[1]
-      of 'A': return ("up", '\0')
-      of 'B': return ("down", '\0')
-      of 'C': return ("right", '\0')
-      of 'D': return ("left", '\0')
-      of 'H': return ("home", '\0')
-      of 'F': return ("end", '\0')
-      of '5':
-        discard readInput(fd, addr seqBuf[2], 1)
-        return ("pageup", '\0')
-      of '6':
-        discard readInput(fd, addr seqBuf[2], 1)
-        return ("pagedown", '\0')
-      of '3':
-        discard readInput(fd, addr seqBuf[2], 1)
-        return ("delete", '\0')
-      else:
-        return ("escape", '\0')
-    return ("escape", '\0')
-
-  if ch == '\r' or ch == '\n':
-    return ("enter", '\0')
-  if ch == '\t':
-    return ("tab", '\0')
-  if ch == '\x7f' or ch == '\b':
-    return ("backspace", '\0')
-  if ch == '\x03':
-    return ("ctrl-c", '\0')
-  if ch == '\x04':
-    return ("ctrl-d", '\0')
-  if ch == '\x15':
-    return ("ctrl-u", '\0')
-  if ch == '\x17':
-    return ("ctrl-w", '\0')
-  if ch == '\x12':
-    return ("ctrl-r", '\0')
-  if ch == ' ':
-    return ("space", ' ')
-  if ch >= ' ' and ch <= '~':
-    return ("char", ch)
-
-  return ("unknown", ch)
+    var sequence = ""
+    if readByte(fd, 35, ch) <= 0: return Key(kind: "escape")
+    if ch notin {'[', 'O'}: return Key(kind: "escape")
+    for i in 0..<32:
+      if readByte(fd, 35, ch) <= 0: return Key(kind: "escape")
+      sequence.add(ch)
+      if ch in {'@'..'~'}: break
+    case sequence
+    of "A": return Key(kind: "up")
+    of "B": return Key(kind: "down")
+    of "C": return Key(kind: "right")
+    of "D": return Key(kind: "left")
+    of "H", "1~", "7~": return Key(kind: "home")
+    of "F", "4~", "8~": return Key(kind: "end")
+    of "5~": return Key(kind: "pageup")
+    of "6~": return Key(kind: "pagedown")
+    of "3~": return Key(kind: "delete")
+    of "200~":
+      pasteActive = true
+      pasteBuffer.setLen(0)
+      return Key(kind: "none")
+    else: return Key(kind: "unknown")
+  case ch
+  of '\r', '\n': Key(kind: "enter")
+  of '\t': Key(kind: "tab")
+  of '\x7f', '\b': Key(kind: "backspace")
+  of '\x03': Key(kind: "ctrl-c")
+  of '\x04': Key(kind: "ctrl-d")
+  of '\x15': Key(kind: "ctrl-u")
+  of '\x17': Key(kind: "ctrl-w")
+  of '\x12': Key(kind: "ctrl-r")
+  of ' ': Key(kind: "space", ch: ch)
+  else:
+    if ch >= ' ' and ch != '\x7f': Key(kind: "char", ch: ch)
+    else: Key(kind: "unknown")
 
 proc runInteractive*(cfg: Config) =
   let stdinFd = cint(getFileHandle(stdin))
+  if not isatty(stdin) or (not isatty(stdout) and not isatty(stderr)):
+    stderr.writeLine("fastfind: interactive mode requires a terminal")
+    quit(2)
+  screenFile = if isatty(stdout): stdout else: stderr
+  initTerminalText()
   let terminalState = enableRawTerminal(stdinFd)
+  stopSignalNumber = 0
+  when defined(posix):
+    let previousInt = swapSignal(SIGINT, stopOnSignal)
+    let previousTerm = swapSignal(SIGTERM, stopOnSignal)
+    defer:
+      discard swapSignal(SIGINT, previousInt)
+      discard swapSignal(SIGTERM, previousTerm)
+  screenWrite("\x1b[?1049h\x1b[?2004h")
 
   var cleanupDone = false
 
   proc cleanup() =
     if not cleanupDone:
       restoreTerminal(stdinFd, terminalState)
+      screenWrite(ColorReset & "\x1b[?2004l\x1b[?1049l")
       showCur()
-      clearScr()
-      stdout.flushFile()
+      flushScreen()
       cleanupDone = true
 
   defer: cleanup()
@@ -1296,6 +1291,9 @@ proc runInteractive*(cfg: Config) =
   clearScr()
 
   var state = initState(cfg)
+  state.inputFd = stdinFd
+  state.terminalState = terminalState
+  defer: stopGlobalSearch(state)
   loadDirectory(state)
 
   var showingBookmarks = false
@@ -1303,24 +1301,45 @@ proc runInteractive*(cfg: Config) =
   var lastWidth = 0
   var lastHeight = 0
 
-  while state.running:
-    state.width = terminalWidth()
-    state.height = terminalHeight()
+  while state.running and stopSignalNumber == 0:
+    if pollGlobalSearch(state): dirty = true
+    state.width = max(1, terminalWidth())
+    state.height = max(1, terminalHeight())
     if state.width != lastWidth or state.height != lastHeight:
       lastWidth = state.width
       lastHeight = state.height
+      state.previewKey = ""
+      adjustScroll(state)
+      clearScr()
       dirty = true
 
     if dirty:
       render(state)
+      if showingBookmarks:
+        drawBookmarks(state)
+        flushScreen()
       dirty = false
-
-    if showingBookmarks:
-      drawBookmarks(state)
-      stdout.flushFile()
 
     let key = readKey(stdinFd)
     if key.kind != "none": dirty = true
+    if key.kind in ["eof", "ctrl-c"]:
+      state.running = false
+      continue
+    if key.kind == "escape" and state.globalSearching:
+      stopGlobalSearch(state)
+      state.globalMode = false
+      loadDirectory(state)
+      continue
+    if key.kind == "paste":
+      case state.mode
+      of modeSearch:
+        state.query.add(key.text)
+        applyFilter(state)
+      of modeCommand: state.commandLine.add(key.text)
+      of modeGoto: state.gotoPath.add(key.text)
+      of modeGlobalSearch: state.globalPattern.add(key.text)
+      else: state.setMessage("Paste into / filter, g search, or Tab path", "info")
+      continue
 
     if showingBookmarks:
       case key.kind
@@ -1359,13 +1378,7 @@ proc runInteractive*(cfg: Config) =
         of 'l':
           enterDirectory(state)
         of 'g':
-          if state.lastJump == 'g':
-            state.cursor = 0
-            state.scroll = 0
-            state.lastJump = ' '
-          else:
-            toggleGlobalMode(state)
-            state.lastJump = 'g'
+          toggleGlobalMode(state)
         of 'G':
           if state.filtered.len > 0:
             state.cursor = state.filtered.len - 1
@@ -1421,7 +1434,7 @@ proc runInteractive*(cfg: Config) =
             if dirExists(path):
               navigateTo(state, path)
         else:
-          state.lastJump = ' '
+          discard
       of "up":
         if state.cursor > 0:
           dec state.cursor
@@ -1436,18 +1449,15 @@ proc runInteractive*(cfg: Config) =
         enterDirectory(state)
       of "enter":
         let entry = currentEntry(state)
-        if entry.kind == etDir:
+        if entry.kind == etDir or (entry.kind == etLink and dirExists(entry.path)):
           enterDirectory(state)
         else:
-          cleanupDone = true
-          restoreTerminal(stdinFd, terminalState)
-          showCur()
-          stdout.write("\x1b[2J\x1b[H")
+          cleanup()
           if state.selectedPaths.len > 0:
-            for p in state.selectedPaths:
-              echo p
+            for path in state.selectedPaths:
+              stdout.write(terminalText(path, cfg.print0) & (if cfg.print0: "\0" else: "\n"))
           elif entry.name.len > 0:
-            echo entry.path
+            stdout.write(terminalText(entry.path, cfg.print0) & (if cfg.print0: "\0" else: "\n"))
           stdout.flushFile()
           state.running = false
       of "space":
@@ -1491,12 +1501,12 @@ proc runInteractive*(cfg: Config) =
       case key.kind
       of "none":
         sleep(10)
-      of "char":
+      of "char", "space":
         state.query.add(key.ch)
         applyFilter(state)
       of "backspace":
         if state.query.len > 0:
-          state.query.setLen(state.query.len - 1)
+          eraseLastRune(state.query)
           applyFilter(state)
         else:
           state.mode = modeBrowse
@@ -1526,11 +1536,11 @@ proc runInteractive*(cfg: Config) =
       case key.kind
       of "none":
         sleep(10)
-      of "char":
+      of "char", "space":
         state.globalPattern.add(key.ch)
       of "backspace":
         if state.globalPattern.len > 0:
-          state.globalPattern.setLen(state.globalPattern.len - 1)
+          eraseLastRune(state.globalPattern)
         else:
           state.globalMode = false
           state.mode = modeBrowse
@@ -1559,11 +1569,11 @@ proc runInteractive*(cfg: Config) =
       case key.kind
       of "none":
         sleep(10)
-      of "char":
+      of "char", "space":
         state.gotoPath.add(key.ch)
       of "backspace":
         if state.gotoPath.len > 0:
-          state.gotoPath.setLen(state.gotoPath.len - 1)
+          eraseLastRune(state.gotoPath)
         else:
           state.mode = modeBrowse
       of "tab":
@@ -1611,11 +1621,11 @@ proc runInteractive*(cfg: Config) =
       case key.kind
       of "none":
         sleep(10)
-      of "char":
+      of "char", "space":
         state.commandLine.add(key.ch)
       of "backspace":
         if state.commandLine.len > 0:
-          state.commandLine.setLen(state.commandLine.len - 1)
+          eraseLastRune(state.commandLine)
         else:
           state.mode = modeBrowse
       of "enter":
@@ -1637,12 +1647,14 @@ proc runInteractive*(cfg: Config) =
       of "char":
         if key.ch in ['f', 'd', 'l']:
           state.typeFilter = $key.ch
-          loadDirectory(state)
+          if state.globalMode: refreshGlobalView(state)
+          else: loadDirectory(state)
           state.setMessage("Filter: " & (if key.ch == 'f': "files" elif key.ch == 'd': "dirs" else: "links"), "info")
         state.mode = modeBrowse
       of "enter":
         state.typeFilter = ""
-        loadDirectory(state)
+        if state.globalMode: refreshGlobalView(state)
+        else: loadDirectory(state)
         state.setMessage("Filter cleared", "info")
         state.mode = modeBrowse
       of "escape":

@@ -1,6 +1,6 @@
 # fastfind.nimble - Nim utility: fast file finder
 
-version       = "2.4.0"
+version       = "2.5.0"
 author        = "RobertFlexx"
 description   = "fastfind: a fast, feature-rich file finder with fuzzy search, interactive terminal UI, and git awareness."
 license       = "MIT"
@@ -33,9 +33,12 @@ task check, "Compile check":
   exec "nim c src/ff.nim"
 
 task test, "Run CLI regression tests":
-  exec "nim c --mm:orc --threads:on -d:release --opt:speed -o:/tmp/fastfind-under-test src/ff.nim"
-  exec "nim c -r --mm:orc --threads:on tests/test_nlp.nim"
+  exec "nim c --nimcache:nimcache/test-cli --mm:orc --threads:on -d:release --opt:speed -o:/tmp/fastfind-under-test src/ff.nim"
+  exec "nim c -r --nimcache:nimcache/test-nlp --mm:orc --threads:on -o:/tmp/fastfind-test-nlp tests/test_nlp.nim"
+  exec "nim c -r --nimcache:nimcache/test-engine --mm:orc --threads:on -o:/tmp/fastfind-test-engine tests/test_engine.nim"
   exec "bash tests/cli_regression.sh /tmp/fastfind-under-test"
+  exec "python3 tests/search_regression.py /tmp/fastfind-under-test"
+  exec "python3 tests/interactive_regression.py /tmp/fastfind-under-test"
 
 task clean, "Remove build artifacts":
   exec "rm -rf bin/fastfind nimcache"

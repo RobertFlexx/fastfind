@@ -1,4 +1,4 @@
-.TH FASTFIND 1 "September 2026" "fastfind 2.4.0" "User Commands"
+.TH FASTFIND 1 "October 2026" "fastfind 2.5.0" "User Commands"
 
 .SH NAME
 fastfind \\- blazing fast file search utility with fuzzy matching and git awareness
@@ -20,7 +20,7 @@ Fastfind is a high-performance file searching utility written in Nim, designed a
 command. It combines exceptional speed with a rich feature set including multiple pattern matching modes, flexible filtering, and git-aware searching.
 
 .PP
-Fastfind uses an optimized single-threaded traversal algorithm that achieves significantly better performance than parallel implementations for typical recursive listings. The key to its speed lies in avoiding unnecessary filesystem operations: pattern matching is performed before any stat calls, buffers are reused throughout execution, and output is batched to minimize system call overhead.
+Fastfind uses an adaptive POSIX traversal engine. Small searches remain serial; larger trees use up to eight workers. Use -j 1 to force serial traversal or -j N to select a worker count. The key to its speed lies in avoiding unnecessary filesystem operations: pattern matching is performed before any stat calls, buffers are reused throughout execution, and output is batched to minimize system call overhead.
 
 .SH GETTING STARTED
 
@@ -63,11 +63,11 @@ Rather than allocating new strings for every path construction, fastfind reuses 
 
 .PP
 .B About parallel mode:
-Note that the parallel mode
-.B (-j N)
-is generally
-.I slower
-than single-threaded execution for simple recursive listings. The filesystem traversal workload is I/O-bound, not CPU-bound, so threading adds synchronization overhead without benefit. Use parallel mode only for CPU-intensive workloads like content searching with complex patterns.
+Simple filename listing and counting adapt to the amount of work. Small trees
+finish serially; larger trees use up to eight workers. -j 1 forces serial
+execution and -j N selects up to 32 workers. Streaming output uses a bounded
+64 KiB buffer per worker. Following symlinks and hierarchical Git ignore rules
+currently use serial traversal.
 
 .SH PATTERN MATCHING
 
@@ -491,3 +491,23 @@ Written by RobertFlexx.
 
 MIT License - see LICENSE file for details.
 https://github.com/RobertFlexx/fastfind/blob/main/LICENSE
+
+.SH NATURAL LANGUAGE QUERIES
+Use --query TEXT to explicitly interpret a sentence, and --explain to inspect
+its filters. Explicit --glob, --regex and --fixed patterns bypass automatic
+natural-language detection. The parser runs locally without a network service.
+.PP
+Supported clauses include file categories and languages, name prefixes,
+suffixes and alternatives, literal or regex content, content AND/OR, negative
+content, calendar dates, relative times, size ranges, paths, exclusions,
+written-number limits and sorting. Unrecognized words produce a name filter
+or a warning; arbitrary semantic understanding is not guaranteed.
+.PP
+.nf
+ff --query 'ten largest PDF files in my downloads'
+ff --query 'python files containing TODO and FIXME excluding vendor'
+ff --query 'files modified yesterday without containing "secret key"'
+ff --query 'files between one and five megabytes' --explain
+.fi
+.PP
+--not-contains TEXT excludes files containing a literal phrase.

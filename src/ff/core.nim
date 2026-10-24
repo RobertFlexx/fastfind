@@ -57,3 +57,23 @@ proc safeRelPath*(p, root: string): string {.inline.} =
     result = relativePath(p, root)
   except CatchableError:
     result = p
+
+proc withinRoot*(path, root: string): bool {.inline.} =
+  ## Include the separator boundary, including when root is `/` itself.
+  if path == root: return true
+  if root.len == 0 or path.len <= root.len: return false
+  for i in 0..<root.len:
+    if path[i] != root[i]: return false
+  root[^1] == DirSep or path[root.len] == DirSep
+
+proc ownedCopy*(matches: seq[MatchResult]): seq[MatchResult] =
+  ## Copy into the caller's allocator before a producing thread exits. Nim
+  ## strings/sequences must not outlive their allocating thread's heap.
+  result = newSeq[MatchResult](matches.len)
+  for i in 0..<matches.len:
+    result[i] = matches[i]
+    for field in fields(result[i]):
+      when field is string:
+        var copy = newString(field.len)
+        if field.len > 0: copyMem(addr copy[0], unsafeAddr field[0], field.len)
+        field = move copy

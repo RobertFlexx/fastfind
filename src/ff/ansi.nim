@@ -1,4 +1,5 @@
 import std/[os, terminal, strutils, tables]
+from tui_text import safeText
 
 type
   ColorMode* = enum
@@ -122,6 +123,7 @@ proc supportsColor*(mode: ColorMode = cmAuto): bool =
       return false
     if existsEnv("FORCE_COLOR"):
       return true
+    if not isatty(stdout): return false
     let term = getEnv("TERM", "")
     if term == "dumb":
       return false
@@ -136,16 +138,7 @@ proc supportsColor*(mode: ColorMode = cmAuto): bool =
 
 proc sanitizeTerminalText*(value: string): string =
   ## Keep control bytes in filenames from taking over the terminal.
-  result = newStringOfCap(value.len)
-  const hex = "0123456789abcdef"
-  for c in value:
-    let n = ord(c)
-    if n < 32 or n == 127:
-      result.add("\\x")
-      result.add(hex[(n shr 4) and 0xf])
-      result.add(hex[n and 0xf])
-    else:
-      result.add(c)
+  safeText(value)
 
 proc shouldSanitizeTerminalText*(preserveBytes: bool = false): bool =
   ## Terminal detection is a syscall on POSIX. Callers that emit many paths

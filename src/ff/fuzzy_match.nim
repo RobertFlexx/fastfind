@@ -63,7 +63,10 @@ proc fuzzyMatch*(pattern: string; text: string): int =
 
   if bestScore == high(int) div 8: return -1
 
-  bestScore + 100
+  # -1 is reserved for failure. Consecutive/boundary bonuses can make a long
+  # exact match very negative; the old fixed offset silently rejected it.
+  # The pattern-sized offset preserves ordering for a given query.
+  bestScore + patLen * 32 + 100
 
 proc fuzzyMatchMulti*(patterns: seq[string]; text: string): tuple[matched: bool, score: int] =
   result.matched = false

@@ -1,5 +1,5 @@
-import std/[times, strutils, json, osproc, os]
-import cli, core, ansi
+import std/[times, strutils, json, osproc, unicode, base64]
+import cli, core, ansi, shellcmd
 
 const
   TableDivider = "-".repeat(78)
@@ -39,16 +39,36 @@ proc codeSearchTarget*(cfg: Config): string =
   elif cfg.searchSymbol.len > 0: cfg.searchSymbol
   else: ""
 
-proc toJson(cfg: Config; m: MatchResult): JsonNode =
+proc addPathJson(node: JsonNode; key, value: string) =
+  if validateUtf8(value) < 0:
+    node[key] = %value
+    return
+  # JSON text must be UTF-8. Keep a readable replacement plus the original
+  # bytes in Base64 so callers can still address an arbitrary POSIX filename.
+  var readable = newStringOfCap(value.len)
+  var i = 0
+  while i < value.len:
+    let length = runeLenAt(value, i)
+    if length <= 0 or i + length > value.len or
+        validateUtf8(value.toOpenArray(i, min(value.high, i + length - 1))) >= 0:
+      readable.add("\xef\xbf\xbd")
+      inc i
+    else:
+      readable.add(value[i..<i + length])
+      i += length
+  node[key] = %readable
+  node[key & "Bytes"] = %base64.encode(value)
+
+proc matchToJson*(cfg: Config; m: MatchResult): JsonNode =
   result = %*{
-    "path": outPath(cfg, m),
-    "absPath": m.absPath,
-    "relPath": m.relPath,
-    "name": m.name,
     "size": m.size,
     "kind": $m.kind,
     "mtime": fmtTime(m.mtime)
   }
+  result.addPathJson("path", outPath(cfg, m))
+  result.addPathJson("absPath", m.absPath)
+  result.addPathJson("relPath", m.relPath)
+  result.addPathJson("name", m.name)
   if cfg.fuzzyMode and cfg.showFuzzyScore:
     result["fuzzyScore"] = %m.fuzzyScore
   if isCodeSearch(cfg):
@@ -77,10 +97,10 @@ proc execForMatches(cfg: Config; matches: seq[MatchResult]): int =
     let path = m.absPath
     var code = 0
     if cfg.execShell:
-      var parts: seq[string] = @[cfg.execCmd.replace("{}", quoteShell(path))]
+      var parts: seq[string] = @[cfg.execCmd]
       for a in cfg.execArgs:
-        parts.add(a.replace("{}", quoteShell(path)))
-      code = execShellCmd(parts.join(" "))
+        parts.add(a)
+      code = runShellForPath(parts.join(" "), path)
     else:
       var args: seq[string] = @[]
       if cfg.execArgs.len == 0:
@@ -137,12 +157,12 @@ proc emitJson(cfg: Config; matches: seq[MatchResult]) =
   stdout.write('[')
   for i, m in matches:
     if i > 0: stdout.write(',')
-    stdout.write($cfg.toJson(m))
+    stdout.write($cfg.matchToJson(m))
   stdout.writeLine("]")
 
 proc emitNdJson(cfg: Config; matches: seq[MatchResult]) =
   for m in matches:
-    stdout.writeLine $cfg.toJson(m)
+    stdout.writeLine $cfg.matchToJson(m)
 
 proc emitTable(cfg: Config; matches: seq[MatchResult]) =
   let colored = supportsColor(cfg.colorMode)

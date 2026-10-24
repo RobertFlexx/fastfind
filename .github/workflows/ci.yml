@@ -11,6 +11,9 @@ jobs:
   build-and-test:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    strategy:
+      matrix:
+        threads: ["on", "off"]
     steps:
       - name: Check out source
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -25,13 +28,18 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build optimized threaded binary
-        run: nim c --mm:orc --threads:on -d:release --opt:speed -o:/tmp/fastfind-under-test src/ff.nim
+        run: nim c --mm:orc --threads:${{ matrix.threads }} -d:release --opt:speed -o:/tmp/fastfind-under-test src/ff.nim
 
       - name: Run parser and matcher tests
-        run: nim c -r --mm:orc --threads:on --outdir:/tmp tests/test_nlp.nim
+        run: |
+          nim c -r --mm:orc --threads:${{ matrix.threads }} --outdir:/tmp tests/test_nlp.nim
+          nim c -r --mm:orc --threads:${{ matrix.threads }} --outdir:/tmp tests/test_engine.nim
 
       - name: Run CLI regression tests
-        run: bash tests/cli_regression.sh /tmp/fastfind-under-test
+        run: |
+          bash tests/cli_regression.sh /tmp/fastfind-under-test
+          python3 tests/search_regression.py /tmp/fastfind-under-test
+          python3 tests/interactive_regression.py /tmp/fastfind-under-test
 
       - name: Validate shell scripts and patch hygiene
         run: |

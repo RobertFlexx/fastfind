@@ -1,6 +1,7 @@
 # src/fastfind.nim
 import std/[times, os, strutils, algorithm, osproc, json]
 import ff/[cli, search, output, core, fuzzy, matchers, interactive, index, gitops, ranking, semantic, ansi]
+import ff/shellcmd
 
 
 proc sortMatches(cfg: Config; ms: var seq[MatchResult]) =
@@ -66,19 +67,16 @@ proc pickIndex(ms: seq[MatchResult]): int =
 proc applyPlaceholders(s: string; path: string): string =
   s.replace("{}", path)
 
-proc applyShellPlaceholders(s: string; path: string): string =
-  s.replace("{}", quoteShell(path))
-
 proc runExec(cfg: Config; m: MatchResult): int =
   if cfg.execCmd.len == 0: return 0
   let p = m.absPath
 
   if cfg.execShell:
-    var parts: seq[string] = @[applyShellPlaceholders(cfg.execCmd, p)]
+    var parts: seq[string] = @[cfg.execCmd]
     for a in cfg.execArgs:
-      parts.add(applyShellPlaceholders(a, p))
+      parts.add(a)
     let line = parts.join(" ")
-    return execCmd(line)
+    return runShellForPath(line, p)
   else:
     var args: seq[string] = @[]
     if cfg.execArgs.len == 0:
@@ -104,7 +102,7 @@ proc emitOne*(cfg: Config; m: MatchResult) =
     var line = $kindChar(m.kind) & " " &
                align($(m.size), 10) & " " &
                fmtTime(m.mtime) & " " &
-               outPath(cfg, m)
+               printedPath(cfg, m)
     if cfg.fuzzyMode and cfg.showFuzzyScore:
       line &= " [" & $m.fuzzyScore & "]"
     if m.lineNumber > 0:
@@ -112,19 +110,7 @@ proc emitOne*(cfg: Config; m: MatchResult) =
     stdout.writeLine(line)
 
   of omJson, omNdJson:
-    var o = newJObject()
-    o["path"] = %outPath(cfg, m)
-    o["absPath"] = %m.absPath
-    o["relPath"] = %m.relPath
-    o["name"] = %m.name
-    o["size"] = %m.size
-    o["kind"] = %($(m.kind))
-    o["mtime"] = %fmtTime(m.mtime)
-    if cfg.fuzzyMode and cfg.showFuzzyScore:
-      o["fuzzyScore"] = %m.fuzzyScore
-    if m.lineNumber > 0:
-      o["lineNumber"] = %m.lineNumber
-    stdout.writeLine($o)
+    stdout.writeLine($matchToJson(cfg, m))
     
   of omTable:
     discard
@@ -175,12 +161,11 @@ proc runSemanticSearch(cfg: Config): seq[MatchResult] =
 
 proc canUseIndexSearch(cfg: Config): bool =
   cfg.useIndex and indexExists() and indexCovers(cfg.paths) and
-  cfg.containsText.len == 0 and cfg.containsRegex.len == 0 and
+  not cfg.hasContentFilter and
   not cfg.useGitignore and not cfg.oneFileSystem and not cfg.followSymlinks
 
 when isMainModule:
   let cfg = parseCli(commandLineParams())
-  let autoThreads = if cfg.threads > 0: cfg.threads else: 1
 
   if cfg.explainQuery:
     printQueryPlan(cfg)
@@ -225,10 +210,6 @@ when isMainModule:
     cfg.outputMode in [omJson, omTable] or
     cfg.sortKey != skNone or
     cfg.selectMode or
-    # Threads earn their keep during content scans. For path-only searches,
-    # the lighter POSIX walk is faster even when -j is set.
-    (autoThreads > 1 and
-      (cfg.containsText.len > 0 or cfg.containsRegex.len > 0)) or
     cfg.fuzzyMode or
     cfg.rankMode != rmNone or
     cfg.useIndex or
@@ -240,7 +221,8 @@ when isMainModule:
   if needsCollect:
     var res: SearchResult
     var searchCfg = cfg
-    if cfg.sortKey != skNone or cfg.fuzzyMode or cfg.rankMode != rmNone:
+    if cfg.sortKey != skNone or cfg.fuzzyMode or cfg.rankMode != rmNone or
+        cfg.gitModified or cfg.gitUntracked or cfg.gitTracked or cfg.gitChanged:
       searchCfg.limit = 0
     if cfg.gitModified or cfg.gitUntracked or cfg.gitTracked or cfg.gitChanged:
       searchCfg.countOnly = false
@@ -266,11 +248,15 @@ when isMainModule:
       applyGitFilters(cfg, matches)
 
     if cfg.countOnly:
-      stdout.writeLine(if canUseIndexSearch(searchCfg): $res.stats.matched else: $matches.len)
+      var count = if searchCfg.countOnly: res.stats.matched else: matches.len
+      if cfg.limit > 0: count = min(count, cfg.limit)
+      res.stats.matched = count
+      stdout.writeLine($count)
       emitStatsIfNeeded(cfg, res.stats)
       quit(0)
 
     if matches.len == 0:
+      if cfg.outputMode == omJson: discard emitResults(cfg, matches, Stats())
       if not cfg.quietErrors:
         if cfg.naturalQuery.len > 0:
           printNoMatchesNL(cfg.naturalQuery, if cfg.paths.len > 0: cfg.paths[0] else: ".")
@@ -293,7 +279,7 @@ when isMainModule:
         let code = runExec(cfg, chosen)
         if code != 0: quit(code)
       else:
-        stdout.writeLine(outPath(cfg, chosen))
+        stdout.writeLine(printedPath(cfg, chosen))
     else:
       let exitCode = emitResults(cfg, matches, res.stats)
       if exitCode != 0: quit(exitCode)
@@ -320,7 +306,9 @@ when isMainModule:
               outputBuf.add(if cfg.print0: '\0' else: '\n')
               if outputBuf.len > 262140:
                 stdout.write(outputBuf)
-                outputBuf.setLen(0)
+                outputBuf.setLen(0),
+          onBatch = proc(data: string) {.gcsafe.} = stdout.write(data),
+          sanitizePaths = sanitizePaths
         )
       else:
         runSearchStream(cfg,
@@ -337,6 +325,8 @@ when isMainModule:
       stdout.writeLine($matched)
       emitStatsIfNeeded(cfg, stats)
       quit(0)
+
+    matched = stats.matched
 
     if outputBuf.len > 0:
       stdout.write(outputBuf)

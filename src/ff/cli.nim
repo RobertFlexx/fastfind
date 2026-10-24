@@ -36,6 +36,7 @@ type
     olderThan*: Option[Time]
     containsText*: string
     containsRegex*: string
+    notContainsText*: seq[string]
     maxBytes*: int
     allowBinary*: bool
     gitModified*: bool
@@ -81,7 +82,7 @@ type
     fdMode*: bool
 
 const
-  ProductVersion* = "2.4.0"
+  ProductVersion* = "2.5.0"
   Version* = "fastfind " & ProductVersion
   
   # note: these were in here and unused
@@ -165,6 +166,9 @@ proc defaultConfig*(): Config =
   result.explainQuery = false
   result.modeExplicit = false
   result.pathModeExplicit = false
+
+proc hasContentFilter*(cfg: Config): bool {.inline.} =
+  cfg.containsText.len > 0 or cfg.containsRegex.len > 0 or cfg.notContainsText.len > 0
 
 proc unquote(s: string): string =
   let t = s.strip()
@@ -336,7 +340,9 @@ proc helpText(useColor: bool): string =
   result.add(row("--no-gitignore", "Ignore .gitignore"))
   result.add(row("--min-depth N", "Minimum depth"))
   result.add(row("--max-depth N", "Maximum depth"))
-  result.add(row("-j N", "Parallel threads"))
+  result.add(row("-j N", "Worker threads (1 = serial; default adapts)"))
+  result.add(row("--query TEXT", "Interpret a natural-language search explicitly"))
+  result.add(row("--not-contains TEXT", "Exclude files containing literal text"))
   result.add("\n")
   
   result.add(H("FILTERS") & "\n")
@@ -401,22 +407,9 @@ proc helpText(useColor: bool): string =
   result.add("\n")
   
   result.add(R("NOTE") & "\n")
-  result.add("  " & D("Parallel mode (-j) adds threading overhead that") & "\n")
-  result.add("  " & D("hurts performance for simple recursive listing.") & "\n")
-  result.add("  " & D("Default (no -j) is fastest for filename search.") & "\n")
-  result.add("  " & D("Use -j for CPU-intensive work: content search,") & "\n")
-  result.add("  " & D("complex regex, or heavy pattern matching.") & "\n")
-  result.add("\n")
-  
-  result.add(G("KEY") & "\n")
-  result.add("  " & C("TYPE") & " = f(file) d(dir) l(link)\n")
-  result.add("  " & C("TIME") & " = YYYY-MM-DD or 1d,2h,30m\n")
-  result.add("  " & C("EXPR") & " = >10M, 1K..5M, =1GB\n")
-  result.add("\n")
-  
-  result.add(B("MORE") & "\n")
-  result.add("  man ff         Manual page\n")
-  result.add("  ff --version  Version info\n")
+  result.add("  " & D("Simple searches adapt to the tree size; -j 1 forces serial mode.") & "\n")
+  result.add("  " & D("Use --query for a sentence, --explain to inspect its filters.") & "\n")
+  result.add("  " & D("Explicit --glob/--regex/--fixed patterns bypass NLP detection.") & "\n")
 
 proc printHelp*() =
   stdout.write(helpText(supportsColor(cmAuto)))
@@ -453,7 +446,8 @@ proc applyAutoMode(cfg: var Config) =
 proc applyAutoPathMode(cfg: var Config) =
   if cfg.pathModeExplicit or cfg.patterns.len == 0:
     return
-  if '/' in cfg.patterns[0] or '\\' in cfg.patterns[0]:
+  if '/' in cfg.patterns[0] or
+      (defined(windows) and cfg.matchMode != mmRegex and '\\' in cfg.patterns[0]):
     cfg.pathMode = pmFullPath
 
 proc parseTypeValue(val: string): set[EntryType] =
@@ -628,6 +622,15 @@ proc parseCli*(args: seq[string]): Config =
         of "verbose": result.verbose = true
         of "quiet-errors": result.quietErrors = true
         of "recent": result.newerThan = some(getTime() - initDuration(hours = 24))
+        of "query":
+          val = getOptValue(processedArgs, i, val)
+          if val.strip.len == 0: raise newException(ValueError, "--query requires a sentence")
+          result.naturalQuery = val
+          applyParsedQuery(result, parseNaturalQuery(val))
+        of "not-contains":
+          val = getOptValue(processedArgs, i, val)
+          if val.len == 0: raise newException(ValueError, "--not-contains requires text")
+          result.notContainsText.add(val)
         of "explain": result.explainQuery = true
         of "threads":
           val = getOptValue(processedArgs, i, val)
@@ -792,9 +795,11 @@ proc parseCli*(args: seq[string]): Config =
   
   if positionals.len > 0 and result.indexCommand != icNone:
     result.paths = positionals
+  elif result.naturalQuery.len > 0:
+    if positionals.len > 0: result.paths = positionals
   elif positionals.len > 0:
     let first = positionals[0]
-    if isNaturalLanguageQuery(first):
+    if not result.modeExplicit and isNaturalLanguageQuery(first):
       result.naturalQuery = first
       let parsed = parseNaturalQuery(first)
       applyParsedQuery(result, parsed)
@@ -810,7 +815,7 @@ proc parseCli*(args: seq[string]): Config =
                    result.gitTracked or result.gitChanged or
                    result.minSize >= 0 or result.maxSize >= 0 or
                    result.newerThan.isSome or result.olderThan.isSome or
-                   result.containsText.len > 0 or result.containsRegex.len > 0 or
+                   result.hasContentFilter or
                    result.extensions.len > 0 or
                    result.searchFunction.len > 0 or result.searchClass.len > 0 or
                    result.searchSymbol.len > 0
@@ -830,6 +835,8 @@ proc parseCli*(args: seq[string]): Config =
   if result.paths.len == 0:
     result.paths = @["."]
   
+  if result.patterns.len == 0: result.patterns = @["*"]
+
   applyAutoMode(result)
   applyAutoPathMode(result)
   
@@ -838,13 +845,28 @@ proc parseCli*(args: seq[string]): Config =
       try:
         var rxStr = p
         if result.fullMatch:
-          if not rxStr.startsWith("^"): rxStr = "^" & rxStr
-          if not rxStr.endsWith("$"): rxStr = rxStr & "$"
+          rxStr = "\\A(?:" & p & ")\\z"
         validateRegexValue(rxStr, "filename regex")
       except ValueError as e:
         niceError(e.msg)
         quit(2)
   
+  if result.containsRegex.len > 0:
+    try: validateRegexValue(result.containsRegex, "content regex")
+    except ValueError as e:
+      niceError(e.msg)
+      quit(2)
+  if result.matchMode == mmGlob:
+    for pattern in result.patterns:
+      if pattern.find({'?', '['}) >= 0:
+        try: validateRegexValue(globToRegex(pattern), "filename glob")
+        except ValueError as e:
+          niceError(e.msg)
+          quit(2)
+  if not result.explainQuery:
+    for warning in result.queryWarnings:
+      stderr.writeLine("fastfind: query warning: " & sanitizeTerminalText(warning))
+
   if result.fuzzyMode and result.rankMode == rmNone:
     result.rankMode = rmScore
 
@@ -864,18 +886,25 @@ proc applyParsedQuery*(cfg: var Config; pq: ParsedQuery) =
   if pq.olderThan.isSome:
     cfg.olderThan = pq.olderThan
   if pq.types != {}:
-    cfg.types = pq.types
+    cfg.types = cfg.types * pq.types
   if pq.containsText.len > 0:
     cfg.containsText = pq.containsText
   if pq.containsRegex.len > 0:
     cfg.containsRegex = pq.containsRegex
+  cfg.notContainsText.add(pq.notContainsText)
+  if pq.ignoreCase: cfg.ignoreCase = true
+  if pq.fullMatch: cfg.fullMatch = true
+  if pq.countOnly: cfg.countOnly = true
+  if pq.gitTracked: cfg.gitTracked = true
+  if pq.gitUntracked: cfg.gitUntracked = true
+  if pq.gitModified: cfg.gitModified = true
   if pq.extensions.len > 0:
     for ext in pq.extensions:
       if ext notin cfg.extensions: cfg.extensions.add(ext.toLowerAscii())
     cfg.types = cfg.types * {etFile}
   if pq.excludePatterns.len > 0:
     for ex in pq.excludePatterns:
-      cfg.excludes.add("*" & ex & "*")
+      cfg.excludes.add(if ex.find({'*', '?', '['}) >= 0: ex else: "*" & ex & "*")
   if pq.inDirectory.len > 0:
     cfg.paths = @[pq.inDirectory]
   if pq.modeExplicit:
@@ -908,6 +937,15 @@ proc printQueryPlan*(cfg: Config) =
   if cfg.newerThan.isSome: stdout.writeLine("  modified after: " & $cfg.newerThan.get)
   if cfg.olderThan.isSome: stdout.writeLine("  modified before: " & $cfg.olderThan.get)
   if cfg.containsText.len > 0: stdout.writeLine("  content: " & cfg.containsText)
+  if cfg.containsRegex.len > 0: stdout.writeLine("  content regex: " & cfg.containsRegex)
+  for text in cfg.notContainsText: stdout.writeLine("  exclude content: " & text)
+  if cfg.sortKey != skNone: stdout.writeLine("  sort: " & $cfg.sortKey & (if cfg.reverse: " descending" else: " ascending"))
+  if cfg.countOnly: stdout.writeLine("  output: count")
   if cfg.excludes.len > 0: stdout.writeLine("  excludes: " & cfg.excludes.join(", "))
+  stdout.writeLine("  entry types: " & $cfg.types)
+  if cfg.ignoreCase: stdout.writeLine("  matching: case insensitive")
+  if cfg.includeHidden: stdout.writeLine("  include hidden: yes")
+  if cfg.minDepth > 0: stdout.writeLine("  minimum depth: " & $cfg.minDepth)
+  if cfg.maxDepth >= 0: stdout.writeLine("  maximum depth: " & $cfg.maxDepth)
   if cfg.limit > 0: stdout.writeLine("  limit: " & $cfg.limit)
   for warning in cfg.queryWarnings: stderr.writeLine("fastfind: NLP warning: " & warning)

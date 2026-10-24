@@ -1,16 +1,20 @@
 # src/ff/search.nim
 
-import std/[os, strutils, options, re, times, sets]
-import core, cli, matchers, content, fuzzy_match
+import std/[os, strutils, options, re, times, sets, atomics]
+import core, cli, matchers, content, fuzzy_match, ansi
 
 when defined(posix):
   import std/posix
 
 when compileOption("threads"):
-  import std/[atomics, cpuinfo]
+  import std/[cpuinfo, locks]
   import parallel
 
 type
+  SearchControl* = ptr SearchControlObj
+  SearchControlObj = object
+    cancelled: Atomic[bool]
+
   StackEntry = object
     path: string
     depth: int
@@ -21,10 +25,15 @@ type
   SimplePatternKind = enum
     spkExact, spkPrefix, spkSuffix, spkContains, spkUniversal
 
+  PathBatchCallback* = proc(data: string) {.closure, gcsafe.}
+
+const PathBatchSize = 64 * 1024
+
 when compileOption("threads"):
   type
     WorkerContext = object
       rootAbs: string
+      control: SearchControl
       cfg: Config
       matcher: Matcher
       ex: Excluder
@@ -38,12 +47,34 @@ when compileOption("threads"):
       needResultName: bool
       hasExcludes: bool
       oneFileSystem: bool
+      onBatch: PathBatchCallback
+      outputLock: ptr Lock
+      sanitize: bool
 
     WorkerArgs = object
       ctx: ptr WorkerContext
       queue: WorkQueue
       results: ResultCollector
       stats: AtomicStats
+      lifetime: ptr WorkerLifetime
+
+    WorkerLifetime = object
+      lock: Lock
+      changed: Cond
+      finished: int
+      released: bool
+
+proc newSearchControl*(): SearchControl =
+  cast[SearchControl](allocShared0(sizeof(SearchControlObj)))
+
+proc cancel*(control: SearchControl) =
+  if control != nil: control.cancelled.store(true)
+
+proc isCancelled(control: SearchControl): bool {.inline.} =
+  control != nil and control.cancelled.load()
+
+proc destroy*(control: SearchControl) =
+  if control != nil: deallocShared(control)
 
 proc effectiveThreadCount(cfg: Config): int {.inline.} =
   when compileOption("threads"):
@@ -241,7 +272,7 @@ proc shouldFollowLinkDir(cfg: Config; fullPath: string): bool {.inline.} =
 proc needsFileInfo(cfg: Config): bool {.inline.} =
   cfg.minSize >= 0 or cfg.maxSize >= 0 or
   cfg.newerThan.isSome or cfg.olderThan.isSome or
-  cfg.containsText.len > 0 or cfg.containsRegex.len > 0 or
+  cfg.hasContentFilter or
   cfg.outputMode in {omLong, omJson, omNdJson, omTable} or
   cfg.sortKey in {skSize, skTime} or cfg.rankRecency or
   cfg.rankMode in {rmRecency, rmAuto}
@@ -279,10 +310,6 @@ proc scanEntry(rootAbs: string; cfg: Config; matcher: Matcher;
     inc stats.skipped
     return none(MatchResult)
 
-  if needsRegularFileCheck(cfg, kind) and not isRegularFile(fullPath):
-    inc stats.skipped
-    return none(MatchResult)
-
   if cfg.minDepth > 0 and depth < cfg.minDepth:
     inc stats.skipped
     return none(MatchResult)
@@ -303,7 +330,7 @@ proc scanEntry(rootAbs: string; cfg: Config; matcher: Matcher;
     inc stats.skipped
     return none(MatchResult)
 
-  if (cfg.containsText.len > 0 or cfg.containsRegex.len > 0) and kind != etFile:
+  if cfg.hasContentFilter and kind != etFile:
     inc stats.skipped
     return none(MatchResult)
 
@@ -334,6 +361,10 @@ proc scanEntry(rootAbs: string; cfg: Config; matcher: Matcher;
   else:
     if not matcher.anyMatch(name, relPath):
       return none(MatchResult)
+
+  if needsRegularFileCheck(cfg, kind) and not isRegularFile(fullPath):
+    inc stats.skipped
+    return none(MatchResult)
 
   if needResultName:
     ensureName()
@@ -370,6 +401,14 @@ proc scanEntry(rootAbs: string; cfg: Config; matcher: Matcher;
       stats.bytesRead += br
       if not ok: return none(MatchResult)
 
+    for text in cfg.notContainsText:
+      var br: int64 = 0
+      var validFile = false
+      let excluded = fileContainsText(fullPath, text, cfg.maxBytes,
+        cfg.allowBinary, br, effectiveContentIgnoreCase(cfg), addr validFile)
+      stats.bytesRead += br
+      if excluded or not validFile: return none(MatchResult)
+
   some(MatchResult(
     path: relPath,
     relPath: relPath,
@@ -389,10 +428,6 @@ proc scanEntryPathOnly(cfg: Config; matcher: Matcher;
                       needInfo: bool; includeHidden: bool;
                       stats: var Stats): bool =
   if kind notin cfg.types:
-    inc stats.skipped
-    return false
-
-  if needsRegularFileCheck(cfg, kind) and not isRegularFile(fullPath):
     inc stats.skipped
     return false
 
@@ -416,7 +451,7 @@ proc scanEntryPathOnly(cfg: Config; matcher: Matcher;
     inc stats.skipped
     return false
 
-  if (cfg.containsText.len > 0 or cfg.containsRegex.len > 0) and kind != etFile:
+  if cfg.hasContentFilter and kind != etFile:
     inc stats.skipped
     return false
 
@@ -438,6 +473,10 @@ proc scanEntryPathOnly(cfg: Config; matcher: Matcher;
   else:
     if not matcher.anyMatch("", relPath):
       return false
+
+  if needsRegularFileCheck(cfg, kind) and not isRegularFile(fullPath):
+    inc stats.skipped
+    return false
 
   if needInfo:
     var info: FileInfo
@@ -464,6 +503,14 @@ proc scanEntryPathOnly(cfg: Config; matcher: Matcher;
       let ok = fileContainsRegexSmart(fullPath, contentRx.get, cfg.maxBytes, cfg.allowBinary, br, info.size)
       stats.bytesRead += br
       if not ok: return false
+
+    for text in cfg.notContainsText:
+      var br: int64 = 0
+      var validFile = false
+      let excluded = fileContainsText(fullPath, text, cfg.maxBytes,
+        cfg.allowBinary, br, effectiveContentIgnoreCase(cfg), addr validFile)
+      stats.bytesRead += br
+      if excluded or not validFile: return false
 
   true
 
@@ -596,7 +643,7 @@ proc canUseSimplePathStream(cfg: Config): bool {.inline.} =
   cfg.maxDepth < 0 and
   cfg.minSize < 0 and cfg.maxSize < 0 and
   cfg.newerThan.isNone and cfg.olderThan.isNone and
-  cfg.containsText.len == 0 and cfg.containsRegex.len == 0 and
+  not cfg.hasContentFilter and
   cfg.extensions.len == 0
 
 when defined(posix):
@@ -622,6 +669,26 @@ when defined(posix):
     if parent.len > 0 and parent[^1] != '/':
       buf.add('/')
     buf.appendDirentName(name, nameLen)
+
+  proc appendOutputPath(buf: var string; directory: string; rootPrefixLen: int;
+                        name: cstring; nameLen: int; absolute: bool;
+                        terminator: char; sanitize: bool) {.inline.} =
+    let start = buf.len
+    if absolute:
+      buf.add(directory)
+      if directory.len > 0 and directory[^1] != '/': buf.add('/')
+    elif directory.len > rootPrefixLen:
+      let oldLen = buf.len
+      let prefixLen = directory.len - rootPrefixLen
+      buf.setLen(oldLen + prefixLen)
+      copyMem(addr buf[oldLen], unsafeAddr directory[rootPrefixLen], prefixLen)
+      buf.add('/')
+    buf.appendDirentName(name, nameLen)
+    if sanitize:
+      let safe = sanitizeTerminalText(buf[start..^1])
+      buf.setLen(start)
+      buf.add(safe)
+    buf.add(terminator)
 
   proc direntKind(d: ptr Dirent; parentAbs: string;
                   name: cstring; nameLen: int): EntryType =
@@ -767,6 +834,12 @@ when defined(posix):
         ignoreCase: bool
         types: set[EntryType]
         defaultTypes: bool
+        onBatch: PathBatchCallback
+        outputLock: ptr Lock
+        rootPrefixLen: int
+        absolute: bool
+        terminator: char
+        sanitize: bool
 
       CountWorkerArgs = object
         ctx: ptr CountWorkerContext
@@ -777,7 +850,7 @@ when defined(posix):
 
     proc scanCountDirectory(ctx: ptr CountWorkerContext; directory: string;
                             childDirs: var seq[string]; childPath: var string;
-                            stats: var Stats) {.gcsafe.} =
+                            outputBuf: var string; stats: var Stats) {.gcsafe.} =
       childDirs.setLen(0)
       inc stats.visitedDirs
       inc stats.visited
@@ -833,6 +906,14 @@ when defined(posix):
             inc stats.skipped
             continue
           inc stats.matched
+          if ctx.onBatch != nil:
+            outputBuf.appendOutputPath(directory, ctx.rootPrefixLen, name,
+              getNameLen(), ctx.absolute, ctx.terminator, ctx.sanitize)
+            if outputBuf.len >= PathBatchSize:
+              acquire(ctx.outputLock[])
+              try: ctx.onBatch(outputBuf)
+              finally: release(ctx.outputLock[])
+              outputBuf.setLen(0)
 
       discard closedir(dirp)
 
@@ -847,6 +928,7 @@ when defined(posix):
       var stack = newSeqOfCap[string](64)
       var childDirs = newSeqOfCap[string](64)
       var childPath = newStringOfCap(512)
+      var outputBuf = newStringOfCap(PathBatchSize + 512)
 
       while true:
         let rootIdx = args.nextRoot[].fetchAdd(1)
@@ -855,28 +937,33 @@ when defined(posix):
 
         while stack.len > 0:
           let directory = stack.pop()
-          scanCountDirectory(ctx, directory, childDirs, childPath, localStats)
+          scanCountDirectory(ctx, directory, childDirs, childPath, outputBuf, localStats)
           for child in childDirs.mitems:
             stack.add(move child)
 
+      if outputBuf.len > 0:
+        acquire(ctx.outputLock[])
+        try: ctx.onBatch(outputBuf)
+        finally: release(ctx.outputLock[])
       args.stats.addStats(localStats)
 
     proc countThreadCount(cfg: Config; rootAbs: string): int =
       if cfg.threads > 0:
         return effectiveThreadCount(cfg)
 
-      # Directory link count is a cheap fan-out hint on conventional POSIX
-      # filesystems. Keep small/narrow trees serial; broad roots can amortize
-      # thread startup and distribute their children immediately.
-      var st: Stat
-      if posix.stat(rootAbs.cstring, st) != 0 or st.st_nlink < 16:
-        return 1
+      # Probe work in the caller before creating threads. This also works on
+      # filesystems whose directory link counts do not encode fan-out.
       max(1, min(countProcessors(), 8))
 
     proc runCountSimpleParallelPosix(cfg: Config; rootAbs: string;
                                      kind: SimplePatternKind; core: string;
                                      ignoreCase: bool; workerCount: int;
-                                     emitted: var int): Stats =
+                                     emitted: var int;
+                                     onBatch: PathBatchCallback = nil;
+                                     sanitize: bool = false): Stats =
+      var outputLock: Lock
+      initLock(outputLock)
+      defer: deinitLock(outputLock)
       var ctx = CountWorkerContext(
         includeHidden: cfg.includeHidden,
         oneFileSystem: cfg.oneFileSystem,
@@ -885,12 +972,19 @@ when defined(posix):
         pattern: core,
         ignoreCase: ignoreCase,
         types: cfg.types,
-        defaultTypes: cfg.types == {etFile, etDir, etLink}
+        defaultTypes: cfg.types == {etFile, etDir, etLink},
+        onBatch: onBatch,
+        outputLock: addr outputLock,
+        rootPrefixLen: rootAbs.len + (if rootAbs[^1] == '/': 0 else: 1),
+        absolute: cfg.absolute,
+        terminator: if cfg.print0: '\0' else: '\n',
+        sanitize: sanitize
       )
       var roots = newSeqOfCap[string](workerCount * 4)
       var children = newSeqOfCap[string](64)
       var childPath = newStringOfCap(512)
-      scanCountDirectory(addr ctx, rootAbs, roots, childPath, result)
+      var outputBuf = newStringOfCap(PathBatchSize + 512)
+      scanCountDirectory(addr ctx, rootAbs, roots, childPath, outputBuf, result)
 
       # Split high-fan-out children before starting the workers. Recursing only
       # through branch points prevents a large subtree from becoming a single
@@ -901,12 +995,22 @@ when defined(posix):
         var directory = pendingRoots.pop()
         var st: Stat
         if posix.stat(directory.cstring, st) == 0 and st.st_nlink >= 16:
-          scanCountDirectory(addr ctx, directory, children, childPath, result)
+          scanCountDirectory(addr ctx, directory, children, childPath, outputBuf, result)
           for child in children.mitems:
             pendingRoots.add(move child)
         else:
           workRoots.add(move directory)
       roots = move workRoots
+      if cfg.threads == 0:
+        # Finish small trees without starting workers; large trees spend only
+        # a small traversal budget learning whether concurrency pays off.
+        while roots.len > 0 and result.visited < 2048:
+          let directory = roots.pop()
+          scanCountDirectory(addr ctx, directory, children, childPath, outputBuf, result)
+          for child in children.mitems: roots.add(move child)
+      if outputBuf.len > 0:
+        onBatch(outputBuf)
+        outputBuf.setLen(0)
 
       if roots.len == 0:
         emitted += result.matched
@@ -919,13 +1023,16 @@ when defined(posix):
       let rootsPtr = cast[ptr UncheckedArray[string]](addr roots[0])
       let activeWorkers = min(workerCount, roots.len)
 
-      var threads = newSeq[Thread[CountWorkerArgs]](activeWorkers)
-      for i in 0..<activeWorkers:
-        let args = CountWorkerArgs(ctx: addr ctx, roots: rootsPtr,
-          rootCount: roots.len, nextRoot: addr nextRoot, stats: stats)
-        createThread(threads[i], countSimpleWorker, args)
-      for thread in threads.mitems:
-        joinThread(thread)
+      let args = CountWorkerArgs(ctx: addr ctx, roots: rootsPtr,
+        rootCount: roots.len, nextRoot: addr nextRoot, stats: stats)
+      if activeWorkers == 1:
+        countSimpleWorker(args)
+      else:
+        var threads = newSeq[Thread[CountWorkerArgs]](activeWorkers)
+        for i in 0..<activeWorkers:
+          createThread(threads[i], countSimpleWorker, args)
+        for thread in threads.mitems:
+          joinThread(thread)
 
       result = stats.toStats(times.fromUnix(0), times.fromUnix(0))
       emitted += result.matched
@@ -934,14 +1041,18 @@ when defined(posix):
   proc runSearchStreamPathsSimplePosix(cfg: Config; rootAbs: string;
                                        kind: SimplePatternKind; coreCmp: string;
                                        ignoreCase: bool; emitted: var int;
-                                       onPath: proc(p: string)): Stats =
+                                       onPath: proc(p: string);
+                                       onBatch: PathBatchCallback;
+                                       sanitize: bool): Stats =
     let defaultTypes = cfg.types == {etFile, etDir, etLink}
-    if cfg.countOnly:
-      when compileOption("threads"):
+    when compileOption("threads"):
+      if cfg.limit == 0 and (cfg.countOnly or onBatch != nil):
         let workerCount = countThreadCount(cfg, rootAbs)
-        if workerCount > 1 and cfg.limit == 0:
+        if workerCount > 1:
           return runCountSimpleParallelPosix(cfg, rootAbs, kind, coreCmp,
-                                             ignoreCase, workerCount, emitted)
+            ignoreCase, workerCount, emitted,
+            if cfg.countOnly: nil else: onBatch, sanitize)
+    if cfg.countOnly:
       if kind == spkUniversal and defaultTypes:
         return runCountAllPosix(cfg, rootAbs, emitted)
 
@@ -950,6 +1061,8 @@ when defined(posix):
     let hasLimit = cfg.limit > 0
     var pathBuf = newStringOfCap(512)
     var absBuf = newStringOfCap(512)
+    var outputBuf = newStringOfCap(PathBatchSize + 512)
+    let rootPrefixLen = rootAbs.len + (if rootAbs[^1] == '/': 0 else: 1)
     
     let wantAbsolute = cfg.absolute
     let wantHidden = cfg.includeHidden
@@ -1039,6 +1152,12 @@ when defined(posix):
           inc result.matched
           if cfg.countOnly:
             discard
+          elif onBatch != nil:
+            outputBuf.appendOutputPath(currentAbsPath, rootPrefixLen, name,
+              getNameLen(), wantAbsolute, if cfg.print0: '\0' else: '\n', sanitize)
+            if outputBuf.len >= PathBatchSize:
+              onBatch(outputBuf)
+              outputBuf.setLen(0)
           elif wantAbsolute:
             if kindVal != etDir:
               absBuf.setJoinedPath(currentAbsPath, name, getNameLen())
@@ -1052,22 +1171,25 @@ when defined(posix):
             onPath(pathBuf)
           inc emitted
 
+    if outputBuf.len > 0: onBatch(outputBuf)
+
 when compileOption("threads"):
-  proc workerProc(args: WorkerArgs) {.thread, gcsafe.} =
+  proc scanWorker(args: WorkerArgs) {.gcsafe.} =
     let ctx = args.ctx
     var localMatches = newSeqOfCap[MatchResult](128)
     var childDirs = newSeqOfCap[DirEntry](128)
     var relBuf = initPathBuffer(512)
     var spinCount = 0
+    var outputBuf = newStringOfCap(PathBatchSize + 512)
     var localStats: Stats
 
     var gi: Gitignore
     if ctx.useGi:
-      gi.ignoreCase = true
+      gi.ignoreCase = defined(windows)
       gi.compileGitignore(ctx.giLines)
 
     while true:
-      if args.queue.isShutdown() or args.results.isLimitReached():
+      if ctx.control.isCancelled() or args.queue.isShutdown() or args.results.isLimitReached():
         break
 
       # Grab a few directories at a time so the other workers still get work.
@@ -1093,7 +1215,7 @@ when compileOption("threads"):
 
         try:
           for pc, fullPath in walkDir(entry.path, relative = false):
-            if args.results.isLimitReached():
+            if ctx.control.isCancelled() or args.results.isLimitReached():
               break
 
             let kind = entryTypeFromWalk(pc)
@@ -1125,12 +1247,27 @@ when compileOption("threads"):
             )
 
             if om.isSome:
-              inc localStats.matched
-              if ctx.cfg.limit > 0:
+              if ctx.cfg.countOnly:
+                if ctx.cfg.limit == 0 or args.results.countMatch():
+                  inc localStats.matched
+              elif ctx.onBatch != nil:
+                let m = om.get
+                let path = if ctx.cfg.absolute: m.absPath else: m.relPath
+                outputBuf.add(if ctx.sanitize: sanitizeTerminalText(path) else: path)
+                outputBuf.add(if ctx.cfg.print0: '\0' else: '\n')
+                if outputBuf.len >= PathBatchSize:
+                  acquire(ctx.outputLock[])
+                  try: ctx.onBatch(outputBuf)
+                  finally: release(ctx.outputLock[])
+                  outputBuf.setLen(0)
+                inc localStats.matched
+              elif ctx.cfg.limit > 0:
                 if not args.results.addMatch(om.get):
                   args.queue.signalShutdown()
                   break
+                inc localStats.matched
               else:
+                inc localStats.matched
                 localMatches.add(om.get)
 
         except CatchableError:
@@ -1151,9 +1288,27 @@ when compileOption("threads"):
       let added = args.results.addMatches(localMatches)
       if added == 0 and args.results.isLimitReached():
         args.queue.signalShutdown()
+    if outputBuf.len > 0:
+      acquire(ctx.outputLock[])
+      try: ctx.onBatch(outputBuf)
+      finally: release(ctx.outputLock[])
     args.stats.addStats(localStats)
 
-  proc runParallelSearch(cfg: Config; rootAbs: string; globalStart: times.Time): SearchResult =
+  proc workerProc(args: WorkerArgs) {.thread, gcsafe.} =
+    scanWorker(args)
+    # Queued sequences and collected results can be allocated by any worker.
+    # Keep their heaps alive until the caller has copied/reclaimed that data.
+    let lifetime = args.lifetime
+    acquire(lifetime.lock)
+    inc lifetime.finished
+    broadcast(lifetime.changed)
+    while not lifetime.released: wait(lifetime.changed, lifetime.lock)
+    release(lifetime.lock)
+
+  proc runParallelSearch(cfg: Config; rootAbs: string; globalStart: times.Time;
+                         control: SearchControl;
+                         onBatch: PathBatchCallback = nil;
+                         sanitize: bool = false): SearchResult =
     result.stats.startTime = globalStart
 
     let numWorkers = effectiveThreadCount(cfg)
@@ -1167,8 +1322,12 @@ when compileOption("threads"):
     let includeHidden = cfg.includeHidden
     let needResultName = needsResultName(cfg)
 
+    var outputLock: Lock
+    initLock(outputLock)
+    defer: deinitLock(outputLock)
     var ctx = WorkerContext(
       rootAbs: rootAbs,
+      control: control,
       cfg: cfg,
       matcher: matcher,
       ex: ex,
@@ -1181,7 +1340,10 @@ when compileOption("threads"):
       includeHidden: includeHidden,
       needResultName: needResultName,
       hasExcludes: cfg.excludes.len > 0,
-      oneFileSystem: cfg.oneFileSystem
+      oneFileSystem: cfg.oneFileSystem,
+      onBatch: onBatch,
+      outputLock: addr outputLock,
+      sanitize: sanitize
     )
 
     let queue = newWorkQueue()
@@ -1190,6 +1352,14 @@ when compileOption("threads"):
 
     queue.push(DirEntry(path: rootAbs, depth: 0))
 
+    var lifetime: WorkerLifetime
+    initLock(lifetime.lock)
+    initCond(lifetime.changed)
+    defer:
+      deinitCond(lifetime.changed)
+      deinitLock(lifetime.lock)
+    var threads = newSeq[Thread[WorkerArgs]](if numWorkers > 1: numWorkers else: 0)
+
     if numWorkers == 1:
       var args = WorkerArgs(
         ctx: addr ctx,
@@ -1197,28 +1367,35 @@ when compileOption("threads"):
         results: results,
         stats: stats
       )
-      workerProc(args)
+      scanWorker(args)
     else:
-      var threads = newSeq[Thread[WorkerArgs]](numWorkers)
       for i in 0..<numWorkers:
         var args = WorkerArgs(
           ctx: addr ctx,
           queue: queue,
           results: results,
-          stats: stats
+          stats: stats,
+          lifetime: addr lifetime
         )
         createThread(threads[i], workerProc, args)
-      for i in 0..<numWorkers:
-        joinThread(threads[i])
+      acquire(lifetime.lock)
+      while lifetime.finished < numWorkers: wait(lifetime.changed, lifetime.lock)
+      release(lifetime.lock)
 
-    result.matches = results.getMatches()
+    result.matches = ownedCopy(results.getMatches())
     result.stats = stats.toStats(globalStart, times.getTime())
-    if cfg.limit > 0:
+    if cfg.limit > 0 and not cfg.countOnly:
       result.stats.matched = result.matches.len
 
     queue.destroy()
     results.destroy()
     stats.destroy()
+    if numWorkers > 1:
+      acquire(lifetime.lock)
+      lifetime.released = true
+      broadcast(lifetime.changed)
+      release(lifetime.lock)
+      for thread in threads.mitems: joinThread(thread)
 
 proc scanTreeCollect(rootAbs, startDir: string; cfg: Config;
                      matcher: Matcher; ex: Excluder;
@@ -1226,7 +1403,7 @@ proc scanTreeCollect(rootAbs, startDir: string; cfg: Config;
                      contentRx: Option[Regex]; cachedIC: bool;
                      needInfo: bool; includeHidden: bool; needResultName: bool;
                      stats: var Stats; matches: var seq[MatchResult];
-                     stopAt: var bool) =
+                     stopAt: var bool; control: SearchControl) =
   var stack = newSeqOfCap[StackEntry](64)
   stack.add(StackEntry(path: startDir, depth: 0, gi: gi))
   var visitedDirs = initHashSet[FileIdentity]()
@@ -1241,7 +1418,7 @@ proc scanTreeCollect(rootAbs, startDir: string; cfg: Config;
     else:
       safeRelPath(fullPath, rootAbs)
 
-  while stack.len > 0 and not stopAt:
+  while stack.len > 0 and not stopAt and not control.isCancelled():
     let entry = stack.pop()
     let activeGi = if useGi: extendGitignoreForDir(entry.gi, entry.path) else: entry.gi
     inc stats.visitedDirs
@@ -1249,7 +1426,7 @@ proc scanTreeCollect(rootAbs, startDir: string; cfg: Config;
 
     try:
       for pc, p in walkDir(entry.path, relative = false):
-        if stopAt: break
+        if stopAt or control.isCancelled(): break
 
         let kind = entryTypeFromWalk(pc)
         let childDepth = entry.depth + 1
@@ -1275,7 +1452,7 @@ proc scanTreeCollect(rootAbs, startDir: string; cfg: Config;
                            needInfo, includeHidden, needResultName, stats)
         if om.isSome:
           inc stats.matched
-          matches.add(om.get)
+          if not cfg.countOnly: matches.add(om.get)
           if hasLimit and stats.matched >= limit:
             stopAt = true
             break
@@ -1293,12 +1470,13 @@ proc mergeStats(dst: var Stats; src: Stats) =
   dst.skipped += src.skipped
   dst.bytesRead += src.bytesRead
 
-proc runSearchCollectSingleRoot(cfg: Config; rootAbs: string; globalStart: times.Time): SearchResult =
+proc runSearchCollectSingleRoot(cfg: Config; rootAbs: string; globalStart: times.Time;
+                                control: SearchControl): SearchResult =
   result.stats.startTime = globalStart
 
   when compileOption("threads"):
     if effectiveThreadCount(cfg) > 1:
-      return runParallelSearch(cfg, rootAbs, globalStart)
+      return runParallelSearch(cfg, rootAbs, globalStart, control)
 
   let cachedIC = effectiveIgnoreCase(cfg)
   let matcher = buildMatcher(cfg)
@@ -1312,7 +1490,7 @@ proc runSearchCollectSingleRoot(cfg: Config; rootAbs: string; globalStart: times
 
   var gi: Gitignore
   if giInfo.useGi:
-    gi.ignoreCase = true
+    gi.ignoreCase = defined(windows)
     gi.root = gitignoreRoot(rootAbs)
     gi.compileGitignore(giInfo.lines)
     gi = includeAncestorGitignores(gi, rootAbs)
@@ -1320,26 +1498,27 @@ proc runSearchCollectSingleRoot(cfg: Config; rootAbs: string; globalStart: times
   var stopAt = false
   scanTreeCollect(rootAbs, rootAbs, cfg, matcher, ex, gi, giInfo.useGi, rootDev,
                   contentRx, cachedIC, needInfo, includeHidden, needResultName,
-                  result.stats, result.matches, stopAt)
+                  result.stats, result.matches, stopAt, control)
 
   result.stats.endTime = times.getTime()
 
-proc runSearchCollect*(cfg: Config): SearchResult =
+proc runSearchCollect*(cfg: Config; control: SearchControl = nil): SearchResult =
   let start = times.getTime()
   result.stats.startTime = start
 
   for p in cfg.paths:
-    if cfg.limit > 0 and result.matches.len >= cfg.limit:
+    if control.isCancelled(): break
+    if cfg.limit > 0 and result.stats.matched >= cfg.limit:
       break
 
     let rootAbs = absolutePath(p)
     var localCfg = cfg
     if cfg.limit > 0:
-      localCfg.limit = max(0, cfg.limit - result.matches.len)
+      localCfg.limit = max(0, cfg.limit - result.stats.matched)
       if localCfg.limit == 0:
         break
 
-    let part = runSearchCollectSingleRoot(localCfg, rootAbs, start)
+    let part = runSearchCollectSingleRoot(localCfg, rootAbs, start, control)
     result.matches.add(part.matches)
     mergeStats(result.stats, part.stats)
 
@@ -1368,7 +1547,7 @@ proc runSearchStream*(cfg: Config; onMatch: proc(m: MatchResult)): Stats =
 
     var gi: Gitignore
     if giInfo.useGi:
-      gi.ignoreCase = true
+      gi.ignoreCase = defined(windows)
       gi.root = gitignoreRoot(rootAbs)
       gi.compileGitignore(giInfo.lines)
       gi = includeAncestorGitignores(gi, rootAbs)
@@ -1431,7 +1610,12 @@ proc runSearchStream*(cfg: Config; onMatch: proc(m: MatchResult)): Stats =
 
   result.endTime = times.getTime()
 
-proc runSearchStreamPaths*(cfg: Config; onPath: proc(p: string)): Stats =
+proc runSearchStreamPaths*(cfg: Config; onPath: proc(p: string);
+                           onBatch: PathBatchCallback = nil;
+                           sanitizePaths: bool = false): Stats =
+  ## Batch callbacks are serialized and may run on a worker thread. Their
+  ## buffers are borrowed for the duration of the call; memory stays bounded
+  ## by one 64 KiB buffer per worker, even when stdout is a slow pipe.
   result.startTime = times.getTime()
 
   let cachedIC = effectiveIgnoreCase(cfg)
@@ -1440,7 +1624,7 @@ proc runSearchStreamPaths*(cfg: Config; onPath: proc(p: string)): Stats =
   var emitted = 0
   var spKind: SimplePatternKind
   var spCore = ""
-  let simplePathMode = canUseSimplePathStream(cfg) and parseSimplePattern(cfg, spKind, spCore)
+  let simplePathMode = defined(posix) and canUseSimplePathStream(cfg) and parseSimplePattern(cfg, spKind, spCore)
   let spCoreCmp = if cachedIC: spCore.toLowerAscii() else: spCore
 
   let matcher = if simplePathMode: Matcher() else: buildMatcher(cfg)
@@ -1456,7 +1640,8 @@ proc runSearchStreamPaths*(cfg: Config; onPath: proc(p: string)): Stats =
 
     when defined(posix):
       if simplePathMode:
-        let s = runSearchStreamPathsSimplePosix(cfg, rootAbs, spKind, spCoreCmp, cachedIC, emitted, onPath)
+        let s = runSearchStreamPathsSimplePosix(cfg, rootAbs, spKind, spCoreCmp,
+          cachedIC, emitted, onPath, onBatch, sanitizePaths)
         result.visited += s.visited
         result.visitedFiles += s.visitedFiles
         result.visitedDirs += s.visitedDirs
@@ -1467,12 +1652,20 @@ proc runSearchStreamPaths*(cfg: Config; onPath: proc(p: string)): Stats =
         result.bytesRead += s.bytesRead
         continue
 
+    when compileOption("threads"):
+      if not simplePathMode and effectiveThreadCount(cfg) > 1 and cfg.limit == 0 and
+          onBatch != nil:
+        let part = runParallelSearch(cfg, rootAbs, result.startTime, nil,
+          if cfg.countOnly: nil else: onBatch, sanitizePaths)
+        mergeStats(result, part.stats)
+        continue
+
     let giInfo = buildGitignoreLines(cfg, rootAbs)
     let rootDev = if cfg.oneFileSystem: getDeviceId(rootAbs) else: -1
 
     var gi: Gitignore
     if giInfo.useGi:
-      gi.ignoreCase = true
+      gi.ignoreCase = defined(windows)
       gi.root = gitignoreRoot(rootAbs)
       gi.compileGitignore(giInfo.lines)
       gi = includeAncestorGitignores(gi, rootAbs)

@@ -1,8 +1,48 @@
 # src/ff/content.nim
 import std/[os, strutils, re]
 
+when defined(posix):
+  import std/posix
+
+proc openRegularFile*(f: var File; path: string): bool =
+  ## Open nonblocking first, then verify the opened descriptor. A FIFO or a
+  ## symlink swapped in during traversal must never hang a search or preview.
+  when defined(posix):
+    var flags = O_RDONLY or O_NONBLOCK
+    when declared(O_CLOEXEC): flags = flags or O_CLOEXEC
+    let fd = posix.open(path.cstring, flags)
+    if fd < 0: return false
+    var info: Stat
+    if fstat(fd, info) != 0 or not S_ISREG(info.st_mode):
+      discard posix.close(fd)
+      return false
+    if not system.open(f, FileHandle(fd), fmRead):
+      discard posix.close(fd)
+      return false
+    true
+  else:
+    open(f, path, fmRead)
+
 when not defined(openbsd):
   import std/memfiles
+
+  proc mapRegularFile(path: string): MemFile =
+    when defined(posix):
+      var f: File
+      if not openRegularFile(f, path):
+        raise newException(OSError, "not a readable regular file")
+      defer: close(f)
+      var info: Stat
+      let fd = cint(getFileHandle(f))
+      if fstat(fd, info) != 0 or info.st_size <= 0 or info.st_size > high(int):
+        raise newException(OSError, "file cannot be mapped")
+      result.size = int(info.st_size)
+      result.mem = mmap(nil, result.size, PROT_READ, MAP_PRIVATE, fd, 0)
+      if result.mem == MAP_FAILED:
+        raise newException(OSError, "file cannot be mapped")
+      result.handle = -1
+    else:
+      result = memfiles.open(path, fmRead)
 
 proc looksBinary(buf: openArray[char]): bool =
   for ch in buf:
@@ -34,10 +74,12 @@ proc containsText(buf, needle: string; ignoreCase: bool): bool {.inline.} =
   false
 
 proc fileContainsText*(path: string; needle: string; maxBytes: int; allowBinary: bool;
-                       bytesRead: var int64; ignoreCase: bool = false): bool =
+                       bytesRead: var int64; ignoreCase: bool = false;
+                       validFile: ptr bool = nil): bool =
+  if validFile != nil: validFile[] = false
   if needle.len == 0: return true
   var f: File
-  if not open(f, path, fmRead): return false
+  if not openRegularFile(f, path): return false
   defer: close(f)
 
   let cap = max(0, maxBytes)
@@ -57,15 +99,18 @@ proc fileContainsText*(path: string; needle: string; maxBytes: int; allowBinary:
     let total = carryLen + n
     buf.setLen(total)
     if not allowBinary and looksBinary(buf): return false
-    if containsText(buf, needle, ignoreCase): return true
+    if containsText(buf, needle, ignoreCase):
+      if validFile != nil: validFile[] = true
+      return true
     carryLen = min(max(0, needle.len - 1), total)
     if carryLen > 0:
       moveMem(addr buf[0], addr buf[total - carryLen], carryLen)
+  if validFile != nil: validFile[] = true
   false
 
 proc fileContainsRegex*(path: string; rx: Regex; maxBytes: int; allowBinary: bool; bytesRead: var int64): bool =
   var f: File
-  if not open(f, path, fmRead): return false
+  if not openRegularFile(f, path): return false
   defer: close(f)
 
   let cap = max(0, maxBytes)
@@ -78,7 +123,7 @@ proc fileContainsRegex*(path: string; rx: Regex; maxBytes: int; allowBinary: boo
   if cap > 0 and cap <= 16 * 1024 * 1024:
     var content = newString(cap)
     let n = f.readBuffer(addr content[0], cap)
-    if n <= 0: return false
+    if n <= 0: return "".contains(rx)
     content.setLen(n)
     bytesRead += n
     if not allowBinary and looksBinary(content): return false
@@ -101,6 +146,7 @@ proc fileContainsRegex*(path: string; rx: Regex; maxBytes: int; allowBinary: boo
     if buf.contains(rx): return true
     carryLen = min(RegexOverlap, total)
     moveMem(addr buf[0], addr buf[total - carryLen], carryLen)
+  if readTotal == 0: return "".contains(rx)
   false
 
 when not defined(openbsd):
@@ -110,7 +156,7 @@ when not defined(openbsd):
     
     var mm: MemFile
     try:
-      mm = memfiles.open(path, fmRead)
+      mm = mapRegularFile(path)
     except OSError:
       return false
     
@@ -157,7 +203,7 @@ when not defined(openbsd):
   proc fileContainsRegexMmap*(path: string; rx: Regex; allowBinary: bool; bytesRead: var int64): bool =
     var mm: MemFile
     try:
-      mm = memfiles.open(path, fmRead)
+      mm = mapRegularFile(path)
     except OSError:
       return false
     
@@ -175,10 +221,10 @@ when not defined(openbsd):
       if looksBinaryMem(data, checkLen):
         return false
     
-    var content = newString(size)
-    copyMem(addr content[0], mm.mem, size)
-    
-    return content.contains(rx)
+    # PCRE accepts a pointer and explicit length; duplicating the entire map
+    # used to consume another file-sized allocation per worker.
+    if size > int(high(cint)): return false
+    return find(data, rx, 0, size) >= 0
 
 else:
   # OpenBSD fallbacks - use streaming versions
@@ -232,7 +278,7 @@ proc grepFile*(path: string; pattern: string; ignoreCase: bool = false;
   result = @[]
   
   var f: File
-  if not open(f, path, fmRead): return
+  if not openRegularFile(f, path): return
   defer: close(f)
   
   let searchPat = if ignoreCase: pattern.toLowerAscii() else: pattern
@@ -258,7 +304,7 @@ proc grepFileRegex*(path: string; rx: Regex; maxMatches: int = 100): seq[LineMat
   result = @[]
   
   var f: File
-  if not open(f, path, fmRead): return
+  if not openRegularFile(f, path): return
   defer: close(f)
   
   var lineNum = 0

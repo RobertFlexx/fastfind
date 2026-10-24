@@ -37,7 +37,11 @@ proc parseBytes*(s: string): int64 =
   else:
     raise newException(ParseError, "unknown size unit: " & unitPart)
 
-  result = int64(round(num * mul))
+  let scaled = num * mul
+  if classify(scaled) in {fcNan, fcInf, fcNegInf} or scaled < 0 or
+      scaled >= float(high(int64)):
+    raise newException(ParseError, "size is outside the supported range: " & s)
+  result = int64(round(scaled))
 
 proc parseDuration*(s: string): Duration =
   ## parses durations like: 10s, 5m, 2h, 3d, 1w

@@ -1,4 +1,72 @@
-# Changelog - fastfind v2.4.0
+# Changelog - fastfind v2.5.0
+
+## v2.5.0 - Parallel streaming, interactive browser and query planner
+
+### Performance and correctness
+
+- Stream simple POSIX filename results in parallel using one bounded 64 KiB
+  output buffer per worker, with adaptive startup and explicit serial mode.
+- Stream explicit parallel regex, content and filtered plain searches without
+  retaining every match. Count-only searches also avoid match collection.
+- Keep worker allocators alive until shared queues/results are reclaimed and
+  copy collected results before their producing threads exit. This fixes a
+  reproducible high-concurrency crash in the generic walker.
+- Fix basename regex matching, regex alternation anchoring, wildcard edge
+  cases, repeated stars, newline-containing names and long fuzzy matches.
+- Apply Git filtering before limits, correct indexed/collected counts and
+  indexed subtree boundaries, and reject overflowing/traversing index records.
+- Emit valid UTF-8 JSON for arbitrary POSIX names, retaining original invalid
+  bytes in optional Base64 fields. Empty JSON searches return an empty array.
+- Avoid duplicating large regex memory maps and validate regular-file
+  descriptors before content reads or mapping. Reject out-of-range sizes.
+
+### Security fixes
+
+- Pass shell filename placeholders as arguments rather than inserting path
+  bytes into shell code, including quoted placeholders.
+- Create index refresh files exclusively with unpredictable names, preventing
+  temporary symlinks from truncating an unrelated file.
+- Escape terminal controls, invalid UTF-8 and bidi controls in displayed paths;
+  handle bracketed paste as text. Previews cannot block on FIFOs/devices or
+  allocate an unbounded line.
+
+### Interactive mode
+
+- Add a responsive header, type indicators, aligned details and adaptive
+  preview pane using Unicode terminal-cell widths.
+- Cache metadata and previews; buffer each screen update. Respect the selected
+  root, handle narrow/resized terminals and preserve the original screen.
+- Run recursive searches in cancellable background workers in threaded builds;
+  support NLP queries and sort/type-filter recursive results in memory.
+- Fix spaces, Unicode backspace, fragmented arrow sequences, relative paths,
+  symlink directory navigation and visible-result selection.
+- Restore the terminal on normal exit, Ctrl+C, SIGINT and SIGTERM; suspend raw
+  mode for shell actions and keep redirected selection output free of UI bytes.
+
+### Natural-language queries
+
+- Add explicit `--query` and negative-content `--not-contains` options. Explicit
+  match modes preserve literal multiword patterns instead of invoking NLP.
+- Support written quantities, inherited size-range units, calendar windows,
+  relative intervals, date ranges, newest/largest ordering and count questions.
+- Expand name phrases, prefix/suffix/exact matching, name/format alternatives,
+  quoted content, content AND/OR and negative phrases, home-folder aliases,
+  Git status clauses and common keyword misspellings.
+- Preserve regex escapes, contractions and path casing; retain unfamiliar words
+  as name constraints or warnings and expose the resulting plan with --explain.
+- Add deterministic date tests, a compositional query corpus, filesystem NLP
+  checks, serial/parallel equivalence, hostile-input tests and real PTY tests.
+
+### Release and measurement
+
+- Test threaded and non-threaded builds in CI and enable LTO in binary builds.
+- Replace the Hyperfine dependency with a standard-library Python harness that
+  verifies complete NUL-delimited multisets and measures timing/RSS separately.
+- Record reproducible warm-cache results in `benchmarks/RESULTS.md`: approximately
+  5x fd's eight-thread listing speed on the 102,200-entry synthetic tree and
+  2x on the 314,814-entry `/usr` tree, using 3.54/4.70 MiB peak RSS.
+
+---
 
 ## v2.4.0 - Fast Path Update
 
