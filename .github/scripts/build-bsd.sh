@@ -1,6 +1,6 @@
 #!/bin/sh
 set -eu
-export PATH="/usr/local/bin:/usr/pkg/bin:/usr/pkg/sbin:$PATH"
+export PATH="/usr/local/nim/bin:/usr/pkg/nim/bin:/usr/local/bin:/usr/pkg/bin:/usr/pkg/sbin:$PATH"
 platform="${1:?BSD platform required}"
 case "$platform" in
   freebsd|openbsd) prefix=/usr/local; compiler=clang ;;
@@ -15,6 +15,7 @@ binary="dist/ff-$platform-amd64"
 
 nim c --mm:orc --threads:on -d:release -d:usePcreHeader --opt:speed \
   "--cc:$compiler" --passC:-flto --passL:-flto \
+  --passC:-Wno-error=incompatible-pointer-types \
   "--passC:-I$prefix/include" "--passL:$pcre_archive" \
   "-o:$binary" src/ff.nim
 strip "$binary"
@@ -30,6 +31,7 @@ fi
 # cross-compilation alone cannot establish.
 for suite in test_nlp test_engine; do
   nim c -r --mm:orc --threads:on -d:usePcreHeader "--cc:$compiler" \
+    --passC:-Wno-error=incompatible-pointer-types \
     "--passC:-I$prefix/include" "--passL:$pcre_archive" \
     "-o:dist/$suite" "tests/$suite.nim"
 done

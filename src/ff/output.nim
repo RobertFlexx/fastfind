@@ -1,4 +1,5 @@
-import std/[times, strutils, json, osproc, unicode, base64]
+import std/[times, strutils, json, osproc, base64]
+from std/unicode import validateUtf8, runeLenAt
 import cli, core, ansi, shellcmd
 
 const
