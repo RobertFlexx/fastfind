@@ -3,4 +3,7 @@ bin
 .benchdata/
 nimcache/
 __pycache__/
+build/
+dist/
+package/
 

@@ -1,0 +1,134 @@
+name: Solaris, illumos and DragonFly binaries
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      source_ref:
+        description: Source commit or release tag to build
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'push' || github.event_name == 'pull_request' }}
+
+jobs:
+  generate:
+    name: Generate target-specific C sources
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
+          persist-credentials: false
+      - name: Set up Nim
+        uses: jiro4989/setup-nim-action@cb1fc1270b117457dd0d9f610ec981fad3369cec # v2
+        with:
+          nim-version: 2.2.10
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install source-generation tools
+        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends autoconf automake libtool
+      - name: Prepare portable C and verified PCRE sources
+        run: python3 .github/scripts/generate-native.py
+      - name: Share C sources with native VMs
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-c-sources
+          path: build/native
+          if-no-files-found: error
+          retention-days: 7
+
+  native:
+    name: Build ${{ matrix.platform }} amd64
+    needs: generate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [solaris, omnios, openindiana, tribblix, dragonflybsd]
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
+          persist-credentials: false
+      - name: Download target-specific C sources
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: native-c-sources
+          path: build/native
+      - name: Build and test on Solaris 11.4
+        if: matrix.platform == 'solaris'
+        uses: vmactions/solaris-vm@1c166978f5a2c1f87f1c9d4d8dd85ae3d1eff6f7 # v1
+        with:
+          release: '11.4-gcc-14'
+          arch: x86_64
+          mem: 4096
+          cpu: 2
+          sync: scp
+          prepare: sh .github/scripts/native-deps.sh solaris
+          run: sh .github/scripts/build-native.sh solaris
+      - name: Build and test on OmniOS r151058
+        if: matrix.platform == 'omnios'
+        uses: vmactions/omnios-vm@9576f0b6d15e7696548409baa533bc0a339caf42 # v1
+        with:
+          release: 'r151058-build'
+          arch: x86_64
+          mem: 4096
+          cpu: 2
+          sync: scp
+          prepare: sh .github/scripts/native-deps.sh omnios
+          run: sh .github/scripts/build-native.sh omnios
+      - name: Build and test on OpenIndiana 2026.04
+        if: matrix.platform == 'openindiana'
+        uses: vmactions/openindiana-vm@74a06af3be38c265a2d99d1af520d66a057ff222 # v1
+        with:
+          release: '202604-build'
+          arch: x86_64
+          mem: 4096
+          cpu: 2
+          sync: scp
+          prepare: sh .github/scripts/native-deps.sh openindiana
+          run: sh .github/scripts/build-native.sh openindiana
+      - name: Build and test on Tribblix m41
+        if: matrix.platform == 'tribblix'
+        uses: vmactions/tribblix-vm@036967a9232db5edb0432ca7970d771d3a3c2853 # v1
+        with:
+          release: '0m41'
+          arch: x86_64
+          mem: 4096
+          cpu: 2
+          sync: scp
+          prepare: sh .github/scripts/native-deps.sh tribblix
+          run: sh .github/scripts/build-native.sh tribblix
+      - name: Build and test on DragonFly BSD 6.4.2
+        if: matrix.platform == 'dragonflybsd'
+        uses: vmactions/dragonflybsd-vm@4ab776fa9f914fbea72f13715b451e77e7ef5c41 # v1
+        with:
+          release: '6.4.2'
+          arch: x86_64
+          mem: 4096
+          cpu: 2
+          sync: scp
+          prepare: sh .github/scripts/native-deps.sh dragonflybsd
+          run: sh .github/scripts/build-native.sh dragonflybsd
+      - name: Upload the packaged native target
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-${{ matrix.platform }}-amd64
+          path: |
+            dist/ff-${{ matrix.platform }}-amd64
+            dist/fastfind-${{ matrix.platform }}-amd64.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0

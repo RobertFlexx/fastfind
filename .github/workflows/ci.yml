@@ -110,7 +110,7 @@ jobs:
 
       - name: Generate C for POSIX targets (Solaris also covers illumos)
         run: |
-          for target in linux macosx freebsd openbsd netbsd solaris; do
+          for target in linux macosx freebsd openbsd netbsd dragonfly solaris; do
             for threads in on off; do
               nim c --compileOnly --os:$target --cpu:amd64 --mm:orc --threads:$threads --nimcache:/tmp/fastfind-$target-$threads src/ff.nim
             done
