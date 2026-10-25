@@ -82,4 +82,5 @@ uname -a > "$package/BUILD-INFO.txt"
 if [ -f /etc/release ]; then cat /etc/release >> "$package/BUILD-INFO.txt"; fi
 cat "$bundle/NIM-VERSION.txt" "$bundle/PCRE-SOURCE.txt" >> "$package/BUILD-INFO.txt"
 "$CC" --version >> "$package/BUILD-INFO.txt"
-tar -C package -czf "dist/fastfind-$platform-amd64.tar.gz" "fastfind-$platform-amd64"
+(cd package && tar cf "$root/dist/fastfind-$platform-amd64.tar" "fastfind-$platform-amd64")
+gzip -f "dist/fastfind-$platform-amd64.tar"

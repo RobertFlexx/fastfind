@@ -6,7 +6,7 @@ case "${1:?platform required}" in
   solaris|omnios|openindiana) : ;; # Pinned build images include GCC and make.
   tribblix)
     zap install TRIBv-gcc14 TRIBdev-build-gnu-make TRIBsys-header \
-      TRIBdev-linker TRIBdev-gnu-binutils TRIBdev-object-file
+      TRIBdev-linker TRIBdev-gnu-binutils TRIBdev-object-file TRIBsys-lib-c-runtime
     ;;
   linux) : ;; # Used to validate the native C pipeline locally.
   *) echo 'unsupported native platform' >&2; exit 2 ;;

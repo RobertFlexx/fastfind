@@ -222,6 +222,7 @@ jobs:
           cp "dist/${ASSET_NAME}" "${package_root}/ff"
           ln -s ff "${package_root}/fastfind"
           cp LICENSE README.md "${package_root}/"
+          cp LICENSES/PCRE.txt "${package_root}/PCRE-LICENSE.txt"
           cp mandoc/ff.1 "${package_root}/share/man/man1/ff.1"
           cp mandoc/ff.1 "${package_root}/share/man/man1/fastfind.1"
           tar -C package -czf "dist/${ARCHIVE_NAME}" "fastfind-${PLATFORM_NAME}"
@@ -238,6 +239,7 @@ jobs:
           $packageRoot = "package/fastfind-$env:PLATFORM_NAME"
           New-Item -ItemType Directory -Force $packageRoot | Out-Null
           Copy-Item "dist/$env:ASSET_NAME" "$packageRoot/ff.exe"
+          Copy-Item LICENSES/PCRE.txt "$packageRoot/PCRE-LICENSE.txt"
           Copy-Item "dist/$env:ASSET_NAME" "$packageRoot/fastfind.exe"
           Copy-Item LICENSE, README.md $packageRoot
           Compress-Archive -Path $packageRoot -DestinationPath "dist/$env:ARCHIVE_NAME" -CompressionLevel Optimal
