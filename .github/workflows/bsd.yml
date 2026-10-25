@@ -65,6 +65,9 @@ jobs:
           arch: x86_64
           mem: 4096
           cpu: 2
+          # The rsync mode reinstalls rsync via a mirror that can stall on
+          # TLS for 16 minutes. SCP also copies the built artifacts back.
+          sync: scp
           prepare: sh .github/scripts/bsd-deps.sh netbsd
           run: sh .github/scripts/build-bsd.sh netbsd
 

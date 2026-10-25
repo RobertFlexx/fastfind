@@ -9,6 +9,8 @@
   bounded output buffers and hold worker allocators through queue cleanup.
 - Build and test native FreeBSD 15.1, OpenBSD 8.0, and NetBSD 11.0 binaries;
   publish these targets alongside Linux, macOS, and Windows release assets.
+- Use SCP for NetBSD VM transfers, avoiding a redundant rsync installation
+  that stalled for nearly 16 minutes on a broken TLS mirror.
 - Add deep, skewed-tree equivalence checks across serial, automatic, and
   explicit parallel traversal.
 
