@@ -145,8 +145,10 @@ with tempfile.TemporaryDirectory(prefix='fastfind-tui-') as directory:
     terminal.send(b'\x1b')
     terminal.read(.1)
     terminal.send(b'g*.txt\r')
-    terminal.until(b'nested.txt')
-    assert b'Found ' in terminal.output
+    # A directory preview may already contain nested.txt. Wait for search
+    # completion before checking the result instead of racing the worker.
+    completed_search = terminal.until(b'Found ')
+    assert b'nested.txt' in completed_search, completed_search[-1000:]
     Path('/tmp/fastfind-tui-capture.ansi').write_bytes(terminal.output)
     terminal.finish()
 
