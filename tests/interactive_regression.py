@@ -70,7 +70,11 @@ class Terminal:
         if self.proc.poll() is None:
             self.proc.kill()
             raise AssertionError('interactive mode hung')
-        self.read(.05)
+        # PTY output delivery can lag process exit on BSD kernels. Drain
+        # through the actual cleanup markers instead of assuming 50 ms.
+        cleanup_end = time.monotonic() + 1
+        while (b'\x1b[?1049l' not in self.output or b'\x1b[?2004l' not in self.output) and time.monotonic() < cleanup_end:
+            self.read(.05)
         assert self.proc.returncode == 0, (self.proc.returncode, self.output[-1000:])
         after = termios.tcgetattr(self.slave)
         before = self.before.copy()
@@ -80,8 +84,8 @@ class Terminal:
         before[3] &= ~pending
         after[3] &= ~pending
         assert after == before, 'terminal attributes were not restored'
-        assert b'\x1b[?1049l' in self.output, 'alternate screen was not restored'
-        assert b'\x1b[?2004l' in self.output, 'bracketed paste was not disabled'
+        assert b'\x1b[?1049l' in self.output, ('alternate screen was not restored', self.output[-1000:])
+        assert b'\x1b[?2004l' in self.output, ('bracketed paste was not disabled', self.output[-1000:])
         result = self.proc.stdout.read() if self.proc.stdout else b''
         os.close(self.master)
         os.close(self.slave)
