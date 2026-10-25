@@ -26,6 +26,9 @@ prefix="$root/build/native-pcre"
 mkdir -p "$prefix/lib" "$prefix/include" "$root/dist"
 (
   cd "$bundle/pcre"
+  # Artifact extraction and SCP can reorder mtimes. Release-style timestamps
+  # prevent make from unexpectedly regenerating autotools files in the VM.
+  find . -type f -exec touch -t 200001010000 {} +
   if ! MAKE="$make_cmd" CFLAGS='-O3 -m64 -fPIC' LDFLAGS=-m64 sh ./configure --prefix="$prefix" \
     --disable-shared --enable-static --disable-cpp --enable-utf \
     --enable-unicode-properties --enable-jit \
