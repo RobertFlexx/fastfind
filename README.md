@@ -1,9 +1,18 @@
-# fastfind 2.5.0
+# fastfind 2.5.1
 
 Fast file search with glob, regex, fuzzy and natural-language queries, content
 filters, Git awareness, compact indexes and an interactive terminal browser.
 
 ## Measured performance
+
+Version 2.5.1 fixes full-root load balancing: workers share subtrees discovered
+during traversal instead of assigning a large subtree permanently to one
+worker. Local depth-first scanning avoids queue contention while the other
+workers are busy; idle workers sleep until work arrives. Output remains
+bounded to 64 KiB per worker. See [benchmark details](benchmarks/RESULTS.md)
+for the full-root comparison and measurement limits.
+
+The following table records the earlier 2.5.0 measurements.
 
 Warm-cache Linux measurements on an Intel i7-9700 (8 cores), Nim 2.2.0,
 ORC, release optimizations and LTO; fd 10.5.0. The synthetic tree contains
@@ -118,7 +127,7 @@ those names. JSON output replaces invalid UTF-8 for display and includes
 Base64 `pathBytes`, `absPathBytes`, `relPathBytes` or `nameBytes` fields where
 needed to preserve the original bytes. `--print0` always preserves raw paths.
 
-***[Changelog for 2.5.0](https://github.com/RobertFlexx/fastfind/blob/main/CHANGELOG.md)***
+***[Changelog for 2.5.1](https://github.com/RobertFlexx/fastfind/blob/main/CHANGELOG.md)***
 
 ---
 
@@ -196,8 +205,10 @@ curl -fsSL https://raw.githubusercontent.com/RobertFlexx/fastfind/main/update.sh
 
 * The update script checks your current version and only downloads if there's a new release.
 
-* DISCLAIMER: binaries for other OSes, or musl libc Linux distributions may not ALWAYS be available. Primarily glibc Linux with architecture x86_64.
-* HINT: there are dynamic binaries for: FreeBSD[amd64], OpenBSD[amd64], NetBSD[amd64], Darwin[arm64], Linux[glibc, amd64] (may not be immediately available for newly released versions)
+* Release builds provide Linux glibc and macOS binaries for amd64/arm64,
+  Windows amd64, and native FreeBSD/OpenBSD/NetBSD amd64. PCRE is linked
+  statically; the operating system C runtime is still required. Musl Linux
+  builds are not part of this release matrix.
 ### Or build from source (recommended for best performance)
 
 ```bash

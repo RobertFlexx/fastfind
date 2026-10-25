@@ -850,9 +850,8 @@ when defined(posix):
 
       CountWorkerArgs = object
         ctx: ptr CountWorkerContext
-        roots: ptr UncheckedArray[string]
-        rootCount: int
-        nextRoot: ptr Atomic[int]
+        queue: WorkQueue
+        lifetime: ptr WorkerLifetime
         stats: AtomicStats
 
     proc scanCountDirectory(ctx: ptr CountWorkerContext; directory: string;
@@ -924,35 +923,43 @@ when defined(posix):
 
       discard closedir(dirp)
 
-    proc cloneSharedString(value: var string): string {.inline, gcsafe.} =
-      result = newString(value.len)
-      if value.len > 0:
-        copyMem(addr result[0], unsafeAddr value[0], value.len)
-
-    proc countSimpleWorker(args: CountWorkerArgs) {.thread, gcsafe.} =
+    proc scanSimpleWorker(args: CountWorkerArgs) {.gcsafe.} =
       let ctx = args.ctx
       var localStats: Stats
       var stack = newSeqOfCap[string](64)
       var childDirs = newSeqOfCap[string](64)
+      var tasks = newSeqOfCap[DirEntry](64)
       var childPath = newStringOfCap(512)
       var outputBuf = newStringOfCap(PathBatchSize + 512)
-
-      while true:
-        let rootIdx = args.nextRoot[].fetchAdd(1)
-        if rootIdx >= args.rootCount: break
-        stack.add(cloneSharedString(args.roots[rootIdx]))
-
+      var entry: DirEntry
+      while args.queue.waitPop(entry):
+        stack.add(move entry.path)
         while stack.len > 0:
           let directory = stack.pop()
           scanCountDirectory(ctx, directory, childDirs, childPath, outputBuf, localStats)
-          for child in childDirs.mitems:
-            stack.add(move child)
-
+          for child in childDirs.mitems: stack.add(move child)
+          # Stay allocation-local while workers are busy. Donate sibling
+          # subtrees when a worker becomes idle, including fan-out discovered
+          # far below an initially narrow root.
+          if stack.len > 1 and args.queue.hasWaitingWorkers():
+            let donate = min(64, stack.len - 1)
+            for _ in 0..<donate: tasks.add(DirEntry(path: stack.pop()))
+            args.queue.pushBatch(tasks)
+        args.queue.decPending()
       if outputBuf.len > 0:
         acquire(ctx.outputLock[])
         try: ctx.onBatch(outputBuf)
         finally: release(ctx.outputLock[])
       args.stats.addStats(localStats)
+
+    proc countSimpleWorker(args: CountWorkerArgs) {.thread, gcsafe.} =
+      scanSimpleWorker(args)
+      let lifetime = args.lifetime
+      acquire(lifetime.lock)
+      inc lifetime.finished
+      broadcast(lifetime.changed)
+      while not lifetime.released: wait(lifetime.changed, lifetime.lock)
+      release(lifetime.lock)
 
     proc countThreadCount(cfg: Config; rootAbs: string): int =
       if cfg.threads > 0:
@@ -993,24 +1000,10 @@ when defined(posix):
       var outputBuf = newStringOfCap(PathBatchSize + 512)
       scanCountDirectory(addr ctx, rootAbs, roots, childPath, outputBuf, result)
 
-      # Split high-fan-out children before starting the workers. Recursing only
-      # through branch points prevents a large subtree from becoming a single
-      # straggler without serially walking leaf-heavy directory chains.
-      var pendingRoots = move roots
-      var workRoots = newSeqOfCap[string](max(pendingRoots.len, workerCount * 4))
-      while pendingRoots.len > 0:
-        var directory = pendingRoots.pop()
-        var st: Stat
-        if posix.stat(directory.cstring, st) == 0 and st.st_nlink >= 16:
-          scanCountDirectory(addr ctx, directory, children, childPath, outputBuf, result)
-          for child in children.mitems:
-            pendingRoots.add(move child)
-        else:
-          workRoots.add(move directory)
-      roots = move workRoots
+      # Never partition the whole tree in advance. Directory link counts do
+      # not reliably reflect fan-out (notably on btrfs and virtual filesystems),
+      # and a large tree under one initial child must remain shareable.
       if cfg.threads == 0:
-        # Finish small trees without starting workers; large trees spend only
-        # a small traversal budget learning whether concurrency pays off.
         while roots.len > 0 and result.visited < 2048:
           let directory = roots.pop()
           scanCountDirectory(addr ctx, directory, children, childPath, outputBuf, result)
@@ -1025,25 +1018,37 @@ when defined(posix):
 
       let stats = newAtomicStats()
       stats.addStats(result)
-      var nextRoot: Atomic[int]
-      nextRoot.store(0)
-      let rootsPtr = cast[ptr UncheckedArray[string]](addr roots[0])
-      let activeWorkers = min(workerCount, roots.len)
-
-      let args = CountWorkerArgs(ctx: addr ctx, roots: rootsPtr,
-        rootCount: roots.len, nextRoot: addr nextRoot, stats: stats)
-      if activeWorkers == 1:
-        countSimpleWorker(args)
-      else:
-        var threads = newSeq[Thread[CountWorkerArgs]](activeWorkers)
-        for i in 0..<activeWorkers:
-          createThread(threads[i], countSimpleWorker, args)
-        for thread in threads.mitems:
-          joinThread(thread)
+      let queue = newWorkQueue()
+      var initialTasks = newSeqOfCap[DirEntry](roots.len)
+      for root in roots.mitems: initialTasks.add(DirEntry(path: move root))
+      queue.pushBatch(initialTasks)
+      var lifetime: WorkerLifetime
+      initLock(lifetime.lock)
+      initCond(lifetime.changed)
+      defer:
+        deinitCond(lifetime.changed)
+        deinitLock(lifetime.lock)
+      let activeWorkers = workerCount
+      let args = CountWorkerArgs(ctx: addr ctx, queue: queue,
+        lifetime: addr lifetime, stats: stats)
+      var threads = newSeq[Thread[CountWorkerArgs]](activeWorkers)
+      for i in 0..<activeWorkers:
+        createThread(threads[i], countSimpleWorker, args)
+      acquire(lifetime.lock)
+      while lifetime.finished < activeWorkers: wait(lifetime.changed, lifetime.lock)
+      release(lifetime.lock)
 
       result = stats.toStats(times.fromUnix(0), times.fromUnix(0))
       emitted += result.matched
+      # Queue storage may belong to any producing worker's allocator. Reclaim
+      # it while all worker heaps are still held alive at the lifetime barrier.
+      queue.destroy()
       stats.destroy()
+      acquire(lifetime.lock)
+      lifetime.released = true
+      broadcast(lifetime.changed)
+      release(lifetime.lock)
+      for thread in threads.mitems: joinThread(thread)
 
   proc runSearchStreamPathsSimplePosix(cfg: Config; rootAbs: string;
                                        kind: SimplePatternKind; coreCmp: string;

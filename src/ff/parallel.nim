@@ -13,6 +13,8 @@ type
   WorkQueueObj = object
     items*: seq[DirEntry]
     lock: Lock
+    available: Cond
+    waiting: Atomic[int]
     pendingCount: Atomic[int]
     shutdown: Atomic[bool]
 
@@ -43,12 +45,15 @@ proc newWorkQueue*(): WorkQueue =
   result = cast[WorkQueue](allocShared0(sizeof(WorkQueueObj)))
   result.items = @[]
   initLock(result.lock)
+  initCond(result.available)
+  result.waiting.store(0)
   result.pendingCount.store(0)
   result.shutdown.store(false)
 
 proc destroy*(q: WorkQueue) =
   if q != nil:
     q.items = @[]
+    deinitCond(q.available)
     deinitLock(q.lock)
     deallocShared(q)
 
@@ -56,6 +61,7 @@ proc push*(q: WorkQueue, entry: sink DirEntry) =
   discard q.pendingCount.fetchAdd(1)
   acquire(q.lock)
   q.items.add(move entry)
+  if q.waiting.load() > 0: signal(q.available)
   release(q.lock)
 
 proc pushBatch*(q: WorkQueue, entries: var seq[DirEntry]) =
@@ -65,6 +71,7 @@ proc pushBatch*(q: WorkQueue, entries: var seq[DirEntry]) =
   for entry in entries.mitems:
     q.items.add(move entry)
   entries.setLen(0)
+  if q.waiting.load() > 0: broadcast(q.available)
   release(q.lock)
 
 proc tryPopBatch*(q: WorkQueue; maxCount: int): seq[DirEntry] =
@@ -84,17 +91,42 @@ proc tryPopBatch*(q: WorkQueue; maxCount: int): seq[DirEntry] =
   q.items.setLen(startIdx)
   release(q.lock)
 
+proc waitPop*(q: WorkQueue; entry: var DirEntry): bool =
+  ## Sleep until work arrives or all queued/in-flight tasks finish. Keeping
+  ## the predicate and wait under the same lock prevents lost wakeups.
+  acquire(q.lock)
+  while q.items.len == 0:
+    if q.pendingCount.load() == 0 or q.shutdown.load():
+      release(q.lock)
+      return false
+    discard q.waiting.fetchAdd(1)
+    wait(q.available, q.lock)
+    discard q.waiting.fetchSub(1)
+  entry = move q.items[^1]
+  q.items.setLen(q.items.len - 1)
+  release(q.lock)
+  true
+
+proc hasWaitingWorkers*(q: WorkQueue): bool {.inline.} =
+  q.waiting.load() > 0
+
 proc signalShutdown*(q: WorkQueue) =
   q.shutdown.store(true)
+  acquire(q.lock)
+  broadcast(q.available)
+  release(q.lock)
 
 proc isShutdown*(q: WorkQueue): bool =
   q.shutdown.load()
 
 proc decPending*(q: WorkQueue) =
-  discard q.pendingCount.fetchSub(1)
+  if q.pendingCount.fetchSub(1) == 1:
+    acquire(q.lock)
+    broadcast(q.available)
+    release(q.lock)
 
 proc isComplete*(q: WorkQueue): bool =
-  # pendingCount tracks queued + in-flight directory work.
+  # pendingCount tracks queued + in-flight traversal tasks.
   q.pendingCount.load() == 0
 
 proc newResultCollector*(limit: int = 0): ResultCollector =

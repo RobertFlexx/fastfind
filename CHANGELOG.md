@@ -1,6 +1,16 @@
-# Changelog - fastfind v2.5.0
+# Changelog - fastfind v2.5.1
 
-## Unreleased - Manual rendering and POSIX portability
+## v2.5.1 - Full-root scheduling and native portability
+
+- Balance large root scans dynamically, including filesystems with unreliable
+  directory link counts and trees that fan out below a narrow initial root.
+- Keep depth-first work local while workers are busy, donate sibling subtrees
+  to idle workers, and wake idle workers without millisecond polling. Retain
+  bounded output buffers and hold worker allocators through queue cleanup.
+- Build and test native FreeBSD 15.1, OpenBSD 8.0, and NetBSD 11.0 binaries;
+  publish these targets alongside Linux, macOS, and Windows release assets.
+- Add deep, skewed-tree equivalence checks across serial, automatic, and
+  explicit parallel traversal.
 
 - Fix doubled roff escapes, synopsis spacing, option labels, regex backslashes,
   URL hyphenation, and shell comparison quoting in the manual.

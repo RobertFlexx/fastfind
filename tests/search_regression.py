@@ -90,6 +90,23 @@ with tempfile.TemporaryDirectory(prefix='fastfind-engine-') as directory:
     assert int(run('-j', '4', '--contains', 'needle', '--count', '--limit', '12', '*',
                    root / 'dir00', root / 'dir01')) == 12
 
+    # An initially narrow tree can fan out much deeper. All workers must be
+    # able to share this work without dropping or duplicating directories.
+    skewed = Path(directory) / 'skewed'
+    branch = skewed
+    for _ in range(24):
+        branch /= 'chain'
+    branch.mkdir(parents=True)
+    for i in range(64):
+        leaf = branch / f'branch{i:02}' / 'leaf'
+        leaf.mkdir(parents=True)
+        (leaf / 'match.txt').touch()
+        (leaf / '.hidden.txt').touch()
+    expected = paths(skewed, '-j', '1', '--hidden', '*')
+    for flags in [[], ['-j', '2'], ['-j', '8'], ['-j', '32']]:
+        assert paths(skewed, *flags, '--hidden', '*') == expected
+        assert int(run(*flags, '--hidden', '--count', '*', skewed)) == sum(expected.values())
+
     index = Path(directory) / 'index'
     env = dict(os.environ, FASTFIND_INDEX=str(index))
     run('--rebuild-index', root, env=env)

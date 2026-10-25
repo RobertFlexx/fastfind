@@ -1,4 +1,53 @@
-# 2.5.0 measurement record
+# Measurement record
+
+## 2.5.1 root scheduling
+
+Same host and compiler settings as the 2.5.0 measurements below. The old
+scheduler is commit `ba7cf81`; the candidate uses dynamic subtree donation
+and condition-variable wakeups. No other local CPU-intensive work ran during
+these measurements.
+
+Each command below streams its complete listing into `wc -l`. The root tree
+had about 5,375,500 entries. After one untimed warmup per command, run order
+was randomized for four measured rounds. Elapsed time includes the pipe and
+`wc`; peak RSS is GNU time's maximum for the finder process.
+
+```sh
+ff-before --no-config '*' / -H -j8 | wc -l
+ff-before --no-config '*' / -H | wc -l
+ff-candidate --no-config '*' / -H -j8 | wc -l
+ff-candidate --no-config '*' / -H | wc -l
+fd . / -H -j8 --no-ignore | wc -l
+```
+
+| Root listing | Median s | Maximum s | Peak KiB |
+| --- | ---: | ---: | ---: |
+| before / 8 workers | 1.987 | 2.012 | 6988 |
+| before / automatic | 2.021 | 2.042 | 7144 |
+| 2.5.1 / 8 workers | 0.479 | 0.486 | 9220 |
+| 2.5.1 / automatic | 0.483 | 0.501 | 9352 |
+| fd / 8 workers / no ignores | 1.257 | 1.265 | 46808 |
+
+On this warm-cache workload, the candidate was about 4.1 times faster than
+the old scheduler and 2.6 times faster than fd, with about one fifth of fd's
+peak RSS. A first baseline scan took 52.98 seconds before cache warming;
+that cold-versus-warm result is excluded from the speedup calculation.
+
+These are live-root timing observations, not an exact filename-equivalence
+test: `/proc`, `/run`, temporary files and process lifetimes change during
+the run. Counts differed by fewer than 220 entries across the measured
+rounds. Hidden entries were included and fd's ignore rules were explicitly
+disabled to align traversal scope. Fixed-fixture regression tests verify
+complete NUL-delimited multisets and counts, including a deep, skewed tree.
+Storage latency and cache state can change the relative result substantially.
+
+A fresh 20-round fixed-fixture comparison verified all 102,200 entries and
+gave 4.81 ms for candidate eight-thread listing, 4.96 ms before, and 21.02 ms
+for fd. Single-thread listing was 21.00 ms, 20.93 ms before, and 91.67 ms for
+fd. Peak candidate RSS was 3728 KiB with eight workers. This checks that the
+root fix retains the existing synthetic-tree throughput and resource use.
+
+## 2.5.0 measurements
 
 Host: Linux 7.2.11-366.current, Intel Core i7-9700, eight physical cores.
 Nim 2.2.0, ORC, GCC and LTO; fd 10.5.0. The baseline is commit
