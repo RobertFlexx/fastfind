@@ -16,12 +16,14 @@ type
     escape: EscapeState
     sequence: string
     sequenceTooLong: bool
+    pending: char
+    hasPending: bool
     pasteActive: bool
     pasteBuffer: string
 
 proc timeoutMs*(decoder: InputDecoder): int =
   case decoder.escape
-  of escapeStart: 35
+  of escapeStart: 100
   of escapeSequence: 250
   of escapeNone:
     if decoder.pasteActive: 20 else: 100
@@ -29,13 +31,22 @@ proc timeoutMs*(decoder: InputDecoder): int =
 proc readingControl*(decoder: InputDecoder): bool =
   decoder.escape != escapeNone or decoder.pasteActive
 
+proc takePending*(decoder: var InputDecoder; ch: var char): bool =
+  if decoder.hasPending:
+    ch = decoder.pending
+    decoder.hasPending = false
+    result = true
+
 proc expire*(decoder: var InputDecoder): TerminalKey =
   case decoder.escape
-  of escapeStart: result.kind = "escape"
-  of escapeSequence: result.kind = "unknown"
+  of escapeStart:
+    result.kind = "escape"
+    decoder.escape = escapeNone
+    decoder.sequence.setLen(0)
+  # A read timeout does not delimit CSI/SS3. Keep the bounded sequence until
+  # its final byte, another Escape, or Ctrl+C, even across long pauses.
+  of escapeSequence: result.kind = "none"
   of escapeNone: result.kind = "none"
-  decoder.escape = escapeNone
-  decoder.sequence.setLen(0)
 
 proc feed*(decoder: var InputDecoder; ch: char): TerminalKey =
   if decoder.pasteActive:
@@ -52,6 +63,13 @@ proc feed*(decoder: var InputDecoder; ch: char): TerminalKey =
       return
     return TerminalKey(kind: "none")
 
+  if ch == '\x03':
+    decoder.escape = escapeNone
+    return TerminalKey(kind: "ctrl-c")
+  if ch == '\x1b':
+    decoder.escape = escapeStart
+    return TerminalKey(kind: "none")
+
   case decoder.escape
   of escapeStart:
     if ch in {'[', 'O'}:
@@ -60,6 +78,10 @@ proc feed*(decoder: var InputDecoder; ch: char): TerminalKey =
       decoder.sequenceTooLong = false
       return TerminalKey(kind: "none")
     decoder.escape = escapeNone
+    # Deliver both keys when Escape and ordinary text arrive together.
+    # Dropping the next byte loses fast Esc-then-/ navigation.
+    decoder.pending = ch
+    decoder.hasPending = true
     return TerminalKey(kind: "escape")
   of escapeSequence:
     if decoder.sequence.len < 32: decoder.sequence.add(ch)
@@ -85,13 +107,9 @@ proc feed*(decoder: var InputDecoder; ch: char): TerminalKey =
   of escapeNone: discard
 
   case ch
-  of '\x1b':
-    decoder.escape = escapeStart
-    TerminalKey(kind: "none")
   of '\r', '\n': TerminalKey(kind: "enter")
   of '\t': TerminalKey(kind: "tab")
   of '\x7f', '\b': TerminalKey(kind: "backspace")
-  of '\x03': TerminalKey(kind: "ctrl-c")
   of '\x04': TerminalKey(kind: "ctrl-d")
   of '\x15': TerminalKey(kind: "ctrl-u")
   of '\x17': TerminalKey(kind: "ctrl-w")

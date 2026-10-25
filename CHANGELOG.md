@@ -27,7 +27,9 @@
 - Keep standalone URLs intact across classic formatters, remove fill-mode
   blank lines rejected by current mandoc, and avoid System V grep extensions.
 - Decode fragmented terminal controls with a persistent parser so delayed
-  arrow bytes cannot open Bookmarks; bound bracketed paste to 64 KiB.
+  arrow bytes cannot open Bookmarks; retain started sequences across read
+  timeouts, retry interrupted reads, and preserve text after Escape. Bound
+  bracketed paste to 64 KiB.
 
 ## v2.5.0 - Parallel streaming, interactive browser and query planner
 

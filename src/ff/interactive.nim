@@ -1,4 +1,5 @@
 import std/[os, terminal, times as times, strutils, algorithm, re, sets]
+when defined(posix): import std/monotimes
 when compileOption("threads"): import std/[atomics, locks]
 import core, cli, search, fuzzy_match, matchers, tui_text, tui_input, content, shellcmd, nlp
 from ansi import terminalText
@@ -1184,24 +1185,30 @@ proc executeCommand(state: var TUIState; cmd: string) =
 
 proc readByte(fd: cint; timeoutMs: int; ch: var char): int =
   when defined(posix):
-    var descriptor = TPollfd(fd: fd, events: POLLIN)
-    let ready = poll(addr descriptor, Tnfds(1), cint(timeoutMs))
-    if ready == 0: return 0
-    if ready < 0:
-      if errno == EINTR: return 0
-      return -1
-    if (descriptor.revents and (POLLHUP or POLLERR or POLLNVAL)) != 0: return -1
-    let n = readInput(fd, addr ch, 1)
-    if n <= 0: return -1
-    return 1
+    let deadline = getMonoTime() + initDuration(milliseconds = timeoutMs)
+    var remaining = timeoutMs
+    while true:
+      var descriptor = TPollfd(fd: fd, events: POLLIN)
+      let ready = poll(addr descriptor, Tnfds(1), cint(remaining))
+      if ready == 0: return 0
+      if ready < 0 and errno != EINTR: return -1
+      if ready > 0:
+        if (descriptor.revents and (POLLHUP or POLLERR or POLLNVAL)) != 0: return -1
+        let n = readInput(fd, addr ch, 1)
+        if n > 0: return 1
+        if n == 0 or errno != EINTR: return -1
+      if stopSignalNumber != 0: return -1
+      remaining = int((deadline - getMonoTime()).inMilliseconds)
+      if remaining <= 0: return 0
   else: -1
 
 proc readKey(fd: cint; decoder: var InputDecoder): TerminalKey =
   var ch: char
   while true:
-    let status = readByte(fd, decoder.timeoutMs(), ch)
-    if status < 0: return TerminalKey(kind: "eof")
-    if status == 0: return decoder.expire()
+    if not decoder.takePending(ch):
+      let status = readByte(fd, decoder.timeoutMs(), ch)
+      if status < 0: return TerminalKey(kind: "eof")
+      if status == 0: return decoder.expire()
     result = decoder.feed(ch)
     if result.kind != "none" or not decoder.readingControl(): return
 
