@@ -27,7 +27,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [freebsd, openbsd, netbsd]
+        os: [freebsd, openbsd]
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -56,20 +56,6 @@ jobs:
           cpu: 2
           prepare: sh .github/scripts/bsd-deps.sh openbsd
           run: sh .github/scripts/build-bsd.sh openbsd
-
-      - name: Build and test on NetBSD 11.0
-        if: matrix.os == 'netbsd'
-        uses: vmactions/netbsd-vm@c8a0d7ddb84619a7a8cc4e652efa7950b3fd9f92 # v1
-        with:
-          release: '11.0'
-          arch: x86_64
-          mem: 4096
-          cpu: 2
-          # The rsync mode reinstalls rsync via a mirror that can stall on
-          # TLS for 16 minutes. SCP also copies the built artifacts back.
-          sync: scp
-          prepare: sh .github/scripts/bsd-deps.sh netbsd
-          run: sh .github/scripts/build-bsd.sh netbsd
 
       - name: Upload the packaged BSD target
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

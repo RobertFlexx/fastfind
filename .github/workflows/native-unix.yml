@@ -1,4 +1,4 @@
-name: Solaris, illumos and DragonFly binaries
+name: Native Unix binaries
 
 on:
   push:
@@ -55,7 +55,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        platform: [solaris, omnios, openindiana, tribblix, dragonflybsd]
+        platform: [solaris, omnios, openindiana, tribblix, dragonflybsd, netbsd]
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -122,6 +122,17 @@ jobs:
           sync: scp
           prepare: sh .github/scripts/native-deps.sh dragonflybsd
           run: sh .github/scripts/build-native.sh dragonflybsd
+      - name: Build and test on NetBSD 11.0
+        if: matrix.platform == 'netbsd'
+        uses: vmactions/netbsd-vm@c8a0d7ddb84619a7a8cc4e652efa7950b3fd9f92 # v1
+        with:
+          release: '11.0'
+          arch: x86_64
+          mem: 4096
+          cpu: 2
+          sync: scp
+          prepare: sh .github/scripts/native-deps.sh netbsd
+          run: sh .github/scripts/build-native.sh netbsd
       - name: Upload the packaged native target
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

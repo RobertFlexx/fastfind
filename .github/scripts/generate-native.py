@@ -18,7 +18,7 @@ PCRE_SHA256 = '671f5333b12a1f7327e05e3ce2ce894dbc6c8750befcd0142f9150843fa9dd46'
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, default=Path('build/native'))
-    parser.add_argument('--targets', nargs='+', default=['solaris', 'dragonfly'])
+    parser.add_argument('--targets', nargs='+', default=['solaris', 'dragonfly', 'netbsd'])
     parser.add_argument('--pcre-archive', type=Path)
     args = parser.parse_args()
     root = args.output.resolve()
@@ -27,7 +27,7 @@ def main():
     shutil.copyfile(Path(dump['libpath']) / 'nimbase.h', root / 'nimbase.h')
     (root / 'NIM-VERSION.txt').write_bytes(subprocess.check_output(['nim', '--version']))
     for target in args.targets:
-        if target not in ['linux', 'solaris', 'dragonfly']:
+        if target not in ['linux', 'solaris', 'dragonfly', 'netbsd']:
             parser.error('unsupported C target: ' + target)
         for name, source, threads in [
             ('ff', 'src/ff.nim', 'on'), ('ff-serial', 'src/ff.nim', 'off'),

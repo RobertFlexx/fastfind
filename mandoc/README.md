@@ -35,7 +35,7 @@ them. The shell check needs only native man, col, awk, and mandoc or nroff. Neit
 check changes the installed system manual pages.
 
 CI runs the full rendering checks on Linux and macOS, the shell check in the
-FreeBSD/OpenBSD/NetBSD build VMs, and full native CLI/man-page checks on
+FreeBSD/OpenBSD build VMs, and full native CLI/man-page checks on NetBSD,
 DragonFly BSD, Solaris 11.4, OmniOS, OpenIndiana, and Tribblix. These jobs run
 after the changes reach GitHub; local
 formatter results do not substitute for native VM results.

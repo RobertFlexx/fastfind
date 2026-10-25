@@ -262,7 +262,7 @@ jobs:
       source_ref: ${{ github.event.release.tag_name || inputs.tag }}
 
   build-native:
-    name: Build Solaris, illumos and DragonFly binaries
+    name: Build native Unix binaries
     uses: ./.github/workflows/native-unix.yml
     with:
       source_ref: ${{ github.event.release.tag_name || inputs.tag }}

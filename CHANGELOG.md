@@ -4,6 +4,8 @@
 
 - Add native amd64 builds on Solaris 11.4, OmniOS r151058, OpenIndiana
   2026.04, Tribblix m41, and DragonFly BSD 6.4.2 using pinned VM actions.
+- Build NetBSD from the pinned C bundle as well, avoiding guest Nim/PCRE
+  package downloads through intermittent mirrors.
 - Compile target-specific Nim C output with each VM's own GCC and headers;
   build a checksum-pinned static PCRE library natively. Exercise parser,
   matcher, input, serial/parallel traversal, content, FIFO and man-page tests.

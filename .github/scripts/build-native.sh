@@ -6,6 +6,7 @@ bundle="$root/build/native"
 export PATH="/usr/xpg4/bin:/usr/gnu/bin:/usr/local/bin:/usr/bin:/usr/sbin:/usr/ccs/bin:/opt/tribblix/bin:$PATH"
 case "$platform" in
   dragonflybsd) target=dragonfly ;;
+  netbsd) target=netbsd ;;
   solaris|omnios|openindiana|tribblix) target=solaris ;;
   linux) target=linux ;;
   *) echo 'unsupported native platform' >&2; exit 2 ;;
