@@ -198,6 +198,15 @@ read_os_release() {
   fi
 }
 
+sunos_platform_id() {
+  case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
+    *omnios*) printf '%s' omnios ;;
+    *openindiana*) printf '%s' openindiana ;;
+    *tribblix*) printf '%s' tribblix ;;
+    *) printf '%s' solaris ;;
+  esac
+}
+
 detect_platform() {
   KERNEL_RAW="$(uname -s 2>/dev/null || true)"
   case "$(printf "%s" "$KERNEL_RAW" | tr '[:upper:]' '[:lower:]')" in
@@ -206,6 +215,8 @@ detect_platform() {
     freebsd) OS="freebsd" ;;
     openbsd) OS="openbsd" ;;
     netbsd) OS="netbsd" ;;
+    dragonfly) OS="dragonflybsd" ;;
+    sunos) OS="$(sunos_platform_id "$(cat /etc/release 2>/dev/null || true)")" ;;
     *) die "unsupported operating system: ${KERNEL_RAW:-unknown}" ;;
   esac
 
@@ -213,7 +224,13 @@ detect_platform() {
     x86_64|amd64) ARCH="amd64" ;;
     aarch64|arm64) ARCH="arm64" ;;
     armv7l|armv7) ARCH="arm" ;;
-    i386|i686) ARCH="386" ;;
+    i86pc|i386|i686)
+      if [ "$KERNEL_RAW" = SunOS ] && [ "$(isainfo -b 2>/dev/null || true)" = 64 ]; then
+        ARCH="amd64"
+      else
+        ARCH="386"
+      fi
+      ;;
     *) die "unsupported architecture: $(uname -m 2>/dev/null || printf unknown)" ;;
   esac
 
@@ -369,15 +386,17 @@ extract_tag_name() {
 }
 
 extract_browser_download_urls() {
-  printf "%s" "$1" | grep -oE 'https://github\.com/[^"]+/releases/download/[^"]+' | sort -u
+  printf '%s' "$1" | python3 -c 'import json, sys
+release = json.load(sys.stdin)
+print("\n".join(sorted({asset["browser_download_url"] for asset in release.get("assets", [])})))'
 }
 arch_token_matches() {
-  local base="$1"
+  local base="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
   case "$ARCH" in
-    amd64) printf "%s" "$base" | grep -qiE '(amd64|x86_64)' ;;
-    arm64) printf "%s" "$base" | grep -qiE '(arm64|aarch64)' ;;
-    arm) printf "%s" "$base" | grep -qiE '(armv7|armv7l|armhf)' ;;
-    386) printf "%s" "$base" | grep -qiE '(386|i686|i386)' ;;
+    amd64) case "$base" in *amd64*|*x86_64*) return 0 ;; *) return 1 ;; esac ;;
+    arm64) case "$base" in *arm64*|*aarch64*) return 0 ;; *) return 1 ;; esac ;;
+    arm) case "$base" in *armv7*|*armhf*) return 0 ;; *) return 1 ;; esac ;;
+    386) case "$base" in *386*|*i686*) return 0 ;; *) return 1 ;; esac ;;
     *) return 1 ;;
   esac
 }
@@ -390,6 +409,8 @@ os_token_matches() {
     freebsd) printf "%s" "$base" | grep -qi 'freebsd' ;;
     openbsd) printf "%s" "$base" | grep -qi 'openbsd' ;;
     netbsd) printf "%s" "$base" | grep -qi 'netbsd' ;;
+    dragonflybsd) printf "%s" "$base" | grep -qi 'dragonflybsd' ;;
+    solaris|omnios|openindiana|tribblix) printf '%s' "$base" | grep -qi "$OS" ;;
     *) return 1 ;;
   esac
 }
@@ -576,7 +597,7 @@ apply_user_prefix() {
   fi
   if [ "$MAN_DIR_EXPLICIT" -eq 0 ]; then
     case "$OS" in
-      openbsd|freebsd|netbsd) MAN_DIR="${PREFIX}/man/man1" ;;
+      openbsd|freebsd|netbsd|dragonflybsd) MAN_DIR="${PREFIX}/man/man1" ;;
       *) MAN_DIR="${PREFIX}/share/man/man1" ;;
     esac
   fi
@@ -589,7 +610,7 @@ finalize_paths() {
     [ -n "$BIN_DIR" ] || BIN_DIR="${PREFIX}/bin"
     if [ -z "$MAN_DIR" ]; then
       case "$OS" in
-        openbsd|freebsd|netbsd) MAN_DIR="${PREFIX}/man/man1" ;;
+        openbsd|freebsd|netbsd|dragonflybsd) MAN_DIR="${PREFIX}/man/man1" ;;
         *) MAN_DIR="${PREFIX}/share/man/man1" ;;
       esac
     fi
@@ -756,13 +777,32 @@ backup_conflicting_alias() {
   run_fs mv "$path" "$backup"
 }
 
+install_file_mode() {
+  local mode="$1" source="$2" destination="$3"
+  case "$OS" in
+    solaris|omnios|openindiana|tribblix)
+      # System V install has different operands. Stage beside the destination
+      # and rename so existing aliases are replaced without following them.
+      [ ! -d "$destination" ] || die "destination is a directory: $destination"
+      local staged=""
+      staged="$(run_fs mktemp "${destination}.XXXXXXXX")"
+      if ! run_fs cp "$source" "$staged" || ! run_fs chmod "$mode" "$staged" ||
+          ! run_fs mv -f "$staged" "$destination"; then
+        run_fs rm -f "$staged"
+        return 1
+      fi
+      ;;
+    *) run_fs install -m "$mode" "$source" "$destination" ;;
+  esac
+}
+
 install_binary() {
   local primary_path="${BIN_DIR}/${PRIMARY_NAME}"
   local secondary_path="${BIN_DIR}/${SECONDARY_NAME}"
 
   step "installing binary"
   ensure_dir "$BIN_DIR"
-  run_fs install -m 755 "$TMP_BIN" "$primary_path"
+  install_file_mode 755 "$TMP_BIN" "$primary_path"
   backup_conflicting_alias "$secondary_path" "$PRIMARY_NAME"
   run_fs rm -f "$secondary_path"
   run_fs ln -s "$PRIMARY_NAME" "$secondary_path"
@@ -777,8 +817,8 @@ install_manpages() {
 
   step "installing manpages"
   ensure_dir "$MAN_DIR"
-  run_fs install -m 644 "$TMP_MAN" "$secondary_man"
-  run_fs install -m 644 "$TMP_MAN" "$primary_man"
+  install_file_mode 644 "$TMP_MAN" "$secondary_man"
+  install_file_mode 644 "$TMP_MAN" "$primary_man"
   okay "installed manpages for man ${SECONDARY_NAME} and man ${PRIMARY_NAME}"
 }
 

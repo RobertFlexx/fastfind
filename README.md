@@ -1,4 +1,4 @@
-# fastfind 2.5.1
+# fastfind 2.5.2
 
 Fast file search with glob, regex, fuzzy and natural-language queries, content
 filters, Git awareness, compact indexes and an interactive terminal browser.
@@ -127,7 +127,7 @@ those names. JSON output replaces invalid UTF-8 for display and includes
 Base64 `pathBytes`, `absPathBytes`, `relPathBytes` or `nameBytes` fields where
 needed to preserve the original bytes. `--print0` always preserves raw paths.
 
-***[Changelog for 2.5.1](https://github.com/RobertFlexx/fastfind/blob/main/CHANGELOG.md)***
+***[Changelog for 2.5.2](https://github.com/RobertFlexx/fastfind/blob/main/CHANGELOG.md)***
 
 ---
 
@@ -153,6 +153,19 @@ Expect occasional bugs or behavioral changes.
 [![FreeBSD](https://img.shields.io/badge/FreeBSD-Supported-2ea44f?style=for-the-badge&logo=freebsd&logoColor=white)](https://www.freebsd.org/)
 [![OpenBSD](https://img.shields.io/badge/OpenBSD-Supported-2ea44f?style=for-the-badge&logo=openbsd&logoColor=white)](https://www.openbsd.org/)
 [![NetBSD](https://img.shields.io/badge/NetBSD-Supported-2ea44f?style=for-the-badge&logo=netbsd&logoColor=white)](https://www.netbsd.org/)
+[![DragonFly BSD](.github/assets/platforms/dragonflybsd.svg)](https://www.dragonflybsd.org/)
+[![Solaris](.github/assets/platforms/solaris.svg)](https://www.oracle.com/solaris/)
+[![illumos](.github/assets/platforms/illumos.svg)](https://illumos.org/)
+
+[![OmniOS](.github/assets/platforms/omnios.svg)](https://omnios.org/)
+[![OpenIndiana](.github/assets/platforms/openindiana.svg)](https://www.openindiana.org/)
+[![Tribblix](.github/assets/platforms/tribblix.svg)](https://tribblix.org/)
+
+Native VM builds cover Solaris 11.4, OmniOS r151058, OpenIndiana 2026.04,
+Tribblix m41, and DragonFly BSD 6.4.2. Each VM compiles its own amd64
+executables, runs parser/matcher/input tests, compares single- and
+multithreaded traversal, and checks both manual names. The illumos targets
+have separate binaries so each distribution's native runtime is tested.
 
 `fastfind`/`ff` is a fast file finder with:
 
@@ -181,10 +194,8 @@ sensitive environment.
 ```bash
 curl -fsSL https://raw.githubusercontent.com/RobertFlexx/fastfind/main/install.sh | bash
 ```
-For some BSDs or Linux Distributions:
-```bash
-curl -fsSL https://raw.githubusercontent.com/RobertFlexx/fastfind/main/install.sh | sh
-```
+The installer requires Bash, Python 3, and curl or wget, including on BSD,
+Solaris, and illumos. Use the Bash command above rather than the system sh.
 
 ### Or if youre on an Arch distro
 
@@ -206,9 +217,10 @@ curl -fsSL https://raw.githubusercontent.com/RobertFlexx/fastfind/main/update.sh
 * The update script checks your current version and only downloads if there's a new release.
 
 * Release builds provide Linux glibc and macOS binaries for amd64/arm64,
-  Windows amd64, and native FreeBSD/OpenBSD/NetBSD amd64. PCRE is linked
-  statically; the operating system C runtime is still required. Musl Linux
-  builds are not part of this release matrix.
+  Windows amd64, and native FreeBSD, OpenBSD, NetBSD, DragonFly BSD, Solaris,
+  OmniOS, OpenIndiana, and Tribblix amd64. PCRE is linked statically; the
+  operating system C runtime is still required. Musl Linux builds are not
+  part of this release matrix.
 ### Or build from source (recommended for best performance)
 
 ```bash
@@ -780,7 +792,9 @@ Project docs:
 
 * Linux: full support
 * macOS: full support
-* BSD: full support
+* FreeBSD, OpenBSD, NetBSD, DragonFly BSD: native CLI builds and tests
+* Solaris 11.4: native CLI builds and tests
+* illumos: native CLI builds and tests on OmniOS, OpenIndiana, and Tribblix
 * Solaris / illumos: POSIX source compatibility checks; native man-page CI on
   Solaris 11.4 and OmniOS. Full CLI execution is not yet covered by native CI.
 * Windows: partial support (interactive/index behavior may differ)

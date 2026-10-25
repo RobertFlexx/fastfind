@@ -259,9 +259,15 @@ jobs:
     with:
       source_ref: ${{ github.event.release.tag_name || inputs.tag }}
 
+  build-native:
+    name: Build Solaris, illumos and DragonFly binaries
+    uses: ./.github/workflows/native-unix.yml
+    with:
+      source_ref: ${{ github.event.release.tag_name || inputs.tag }}
+
   publish:
     name: Attach binaries to ${{ github.event.release.tag_name || inputs.tag }}
-    needs: [build, build-bsd]
+    needs: [build, build-bsd, build-native]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -289,6 +295,11 @@ jobs:
             ff-freebsd-amd64
             ff-openbsd-amd64
             ff-netbsd-amd64
+            ff-dragonflybsd-amd64
+            ff-solaris-amd64
+            ff-omnios-amd64
+            ff-openindiana-amd64
+            ff-tribblix-amd64
             fastfind-linux-glibc-amd64.tar.gz
             fastfind-linux-glibc-arm64.tar.gz
             fastfind-darwin-amd64.tar.gz
@@ -297,6 +308,11 @@ jobs:
             fastfind-freebsd-amd64.tar.gz
             fastfind-openbsd-amd64.tar.gz
             fastfind-netbsd-amd64.tar.gz
+            fastfind-dragonflybsd-amd64.tar.gz
+            fastfind-solaris-amd64.tar.gz
+            fastfind-omnios-amd64.tar.gz
+            fastfind-openindiana-amd64.tar.gz
+            fastfind-tribblix-amd64.tar.gz
           )
 
           for asset in "${expected[@]}"; do

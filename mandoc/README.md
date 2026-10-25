@@ -35,8 +35,9 @@ them. The shell check needs only native man, col, awk, and mandoc or nroff. Neit
 check changes the installed system manual pages.
 
 CI runs the full rendering checks on Linux and macOS, the shell check in the
-FreeBSD/OpenBSD/NetBSD build VMs, and native man-page checks on Solaris 11.4
-and OmniOS (illumos). These jobs run after the changes reach GitHub; local
+FreeBSD/OpenBSD/NetBSD build VMs, and full native CLI/man-page checks on
+DragonFly BSD, Solaris 11.4, OmniOS, OpenIndiana, and Tribblix. These jobs run
+after the changes reach GitHub; local
 formatter results do not substitute for native VM results.
 
 The search engine detects whether `struct dirent` actually has `d_type`.
@@ -45,4 +46,7 @@ code path on Linux, macOS, or BSD, build with `-d:fastfindNoDType` and run the
 CLI and search regression suites. CI also generates C for each POSIX target
 with threads on and off; Nim's `solaris` target covers Solaris and illumos.
 C generation checks Nim declarations and branches, not target C headers,
-linking, or native execution.
+linking, or native execution. The native Unix workflow also emits
+target-specific C with pinned Nim, then compiles and runs that C, a pinned
+static PCRE library, and the tests inside each new platform's VM. This avoids
+depending on the availability or age of distribution Nim packages.

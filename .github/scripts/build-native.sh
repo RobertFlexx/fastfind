@@ -3,7 +3,7 @@ set -eu
 platform="${1:?native platform required}"
 root="$PWD"
 bundle="$root/build/native"
-export PATH="/usr/xpg4/bin:/usr/local/bin:/usr/bin:/usr/sbin:/usr/ccs/bin:/opt/tribblix/bin:$PATH"
+export PATH="/usr/xpg4/bin:/usr/gnu/bin:/usr/local/bin:/usr/bin:/usr/sbin:/usr/ccs/bin:/opt/tribblix/bin:$PATH"
 case "$platform" in
   dragonflybsd) target=dragonfly ;;
   solaris|omnios|openindiana|tribblix) target=solaris ;;
@@ -19,15 +19,20 @@ fi
 : "${CC:?native C compiler not found}"
 export CC
 export PATH="$(dirname "$CC"):$PATH"
+printf 'Native compiler: %s\n' "$CC"
+"$CC" --version
 if command -v gmake >/dev/null 2>&1; then make_cmd=gmake; else make_cmd=make; fi
 prefix="$root/build/native-pcre"
 mkdir -p "$prefix/lib" "$prefix/include" "$root/dist"
 (
   cd "$bundle/pcre"
-  CFLAGS='-O3 -m64 -fPIC' LDFLAGS=-m64 sh ./configure --prefix="$prefix" \
+  if ! MAKE="$make_cmd" CFLAGS='-O3 -m64 -fPIC' LDFLAGS=-m64 sh ./configure --prefix="$prefix" \
     --disable-shared --enable-static --disable-cpp --enable-utf \
     --enable-unicode-properties --enable-jit \
-    --disable-pcregrep-libz --disable-pcregrep-libbz2
+    --disable-dependency-tracking --disable-pcregrep-libz --disable-pcregrep-libbz2; then
+    cat config.log >&2
+    exit 1
+  fi
   "$make_cmd" -j2 libpcre.la
   cp .libs/libpcre.a "$prefix/lib/"
   cp pcre.h "$prefix/include/"

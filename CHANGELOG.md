@@ -1,4 +1,18 @@
-# Changelog - fastfind v2.5.1
+# Changelog - fastfind v2.5.2
+
+## v2.5.2 - Solaris, illumos and DragonFly BSD
+
+- Add native amd64 builds on Solaris 11.4, OmniOS r151058, OpenIndiana
+  2026.04, Tribblix m41, and DragonFly BSD 6.4.2 using pinned VM actions.
+- Compile target-specific Nim C output with each VM's own GCC and headers;
+  build a checksum-pinned static PCRE library natively. Exercise parser,
+  matcher, input, serial/parallel traversal, content, FIFO and man-page tests.
+- Package all five targets in the release workflow with build provenance
+  and checksums, alongside the existing eight binary targets.
+- Add logo badges and separate illumos distribution coverage in the README.
+- Recognize DragonFly and Solaris/illumos distribution names in the installer,
+  detect 64-bit i86pc hosts correctly, and use portable file installation and
+  structured release metadata parsing on System V systems.
 
 ## v2.5.1 - Full-root scheduling and native portability
 
