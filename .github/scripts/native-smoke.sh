@@ -1,5 +1,5 @@
 #!/bin/sh
-set -eu
+set -eux
 binary="${1:?binary required}"
 case "$binary" in /*) ;; *) binary="$PWD/$binary" ;; esac
 fixture="$(mktemp -d "${TMPDIR:-/tmp}/fastfind-native.XXXXXXXX")"

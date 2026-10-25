@@ -795,8 +795,6 @@ Project docs:
 * FreeBSD, OpenBSD, NetBSD, DragonFly BSD: native CLI builds and tests
 * Solaris 11.4: native CLI builds and tests
 * illumos: native CLI builds and tests on OmniOS, OpenIndiana, and Tribblix
-* Solaris / illumos: POSIX source compatibility checks; native man-page CI on
-  Solaris 11.4 and OmniOS. Full CLI execution is not yet covered by native CI.
 * Windows: partial support (interactive/index behavior may differ)
 
 The manual uses classic `man` macros and ASCII roff source for BSD/macOS
