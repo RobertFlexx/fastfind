@@ -28,7 +28,9 @@ contains_text() {
 }
 
 check_output() {
-  col -b < "$fixture/rendered" > "$fixture/plain"
+  # Native col may replace runs of spaces with tabs. Check text independently
+  # of layout, just as the Python rendering regression does.
+  col -b < "$fixture/rendered" | awk '{$1=$1; print}' > "$fixture/plain"
   for artifact in '\-' '\fB' '\fI' '\fR' '\e'; do
     if contains_text "$artifact"; then
       printf 'rendering artifact in %s\n' "$1" >&2
