@@ -51,8 +51,10 @@ proc escapeRe(s: string): string =
       result.add(ch)
 
 proc globToRegex*(glob: string): string =
-  result = newStringOfCap(glob.len * 2 + 4)
-  result.add('^')
+  result = newStringOfCap(glob.len * 2 + 8)
+  # Keep filename wildcards byte-oriented, including newlines, across both
+  # PCRE-backed versions of std/re. Inline flags also cover direct callers.
+  result.add("(?s)\\A")
   var i = 0
   while i < glob.len:
     let c = glob[i]

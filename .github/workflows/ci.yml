@@ -9,17 +9,23 @@ permissions:
 
 jobs:
   build-and-test:
-    runs-on: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
     strategy:
       matrix:
+        runner: [ubuntu-24.04, macos-15]
         threads: ["on", "off"]
     steps:
       - name: Check out source
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
-      - name: Install PCRE runtime
+      - name: Install PCRE runtime (Linux)
+        if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends libpcre3
+
+      - name: Install PCRE runtime (macOS)
+        if: runner.os == 'macOS'
+        run: brew install pcre
 
       - name: Set up Nim
         uses: jiro4989/setup-nim-action@cb1fc1270b117457dd0d9f610ec981fad3369cec # v2
@@ -32,20 +38,81 @@ jobs:
 
       - name: Run parser and matcher tests
         run: |
+          if [ "$RUNNER_OS" = macOS ]; then
+            export DYLD_FALLBACK_LIBRARY_PATH="$(brew --prefix pcre)/lib"
+          fi
           nim c -r --mm:orc --threads:${{ matrix.threads }} --outdir:/tmp tests/test_nlp.nim
           nim c -r --mm:orc --threads:${{ matrix.threads }} --outdir:/tmp tests/test_engine.nim
 
       - name: Run CLI regression tests
         run: |
+          if [ "$RUNNER_OS" = macOS ]; then
+            export DYLD_FALLBACK_LIBRARY_PATH="$(brew --prefix pcre)/lib"
+          fi
           bash tests/cli_regression.sh /tmp/fastfind-under-test
           python3 tests/search_regression.py /tmp/fastfind-under-test
           python3 tests/interactive_regression.py /tmp/fastfind-under-test
+
+      - name: Exercise traversal without dirent.d_type
+        if: matrix.threads == 'on'
+        run: |
+          if [ "$RUNNER_OS" = macOS ]; then
+            export DYLD_FALLBACK_LIBRARY_PATH="$(brew --prefix pcre)/lib"
+          fi
+          nim c --mm:orc --threads:on -d:release -d:fastfindNoDType --opt:speed -o:/tmp/fastfind-portable-under-test src/ff.nim
+          bash tests/cli_regression.sh /tmp/fastfind-portable-under-test
+          python3 tests/search_regression.py /tmp/fastfind-portable-under-test
 
       - name: Validate shell scripts and patch hygiene
         run: |
           bash -n install.sh
           bash -n update.sh
+          bash tests/installer_regression.sh
           git diff --check
+
+  manpages:
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        runner: [ubuntu-24.04, macos-15]
+    steps:
+      - name: Check out source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Install formatters (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends mandoc groff man-db bsdextrautils
+
+      - name: Install groff (macOS)
+        if: runner.os == 'macOS'
+        run: brew install groff
+
+      - name: Check portable roff and both installed man aliases
+        run: |
+          python3 tests/manpage_regression.py --require mandoc --require groff --require nroff --require man
+          sh tests/manpage_portability.sh
+
+  posix-compile:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Set up Nim
+        uses: jiro4989/setup-nim-action@cb1fc1270b117457dd0d9f610ec981fad3369cec # v2
+        with:
+          nim-version: 2.2.10
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate C for POSIX targets (Solaris also covers illumos)
+        run: |
+          for target in linux macosx freebsd openbsd netbsd solaris; do
+            for threads in on off; do
+              nim c --compileOnly --os:$target --cpu:amd64 --mm:orc --threads:$threads --nimcache:/tmp/fastfind-$target-$threads src/ff.nim
+            done
+          done
 
   windows-build:
     runs-on: windows-2022

@@ -1,5 +1,18 @@
 # Changelog - fastfind v2.5.0
 
+## Unreleased - Manual rendering and POSIX portability
+
+- Fix doubled roff escapes, synopsis spacing, option labels, regex backslashes,
+  URL hyphenation, and shell comparison quoting in the manual.
+- Check both manual names with mandoc, groff, nroff, and native man in CI,
+  including BSD, Solaris, and illumos VM jobs.
+- Select the `lstat` traversal fallback when `dirent.d_type` is absent, and
+  exercise it with native regression tests and Solaris compiler checks.
+- Keep glob wildcards matching newline bytes across regex backends and keep
+  interactive confirmation keys visible when paths fill the prompt row.
+- Preserve platform-specific man directories when updating; remove GNU-only
+  utilities and filesystem/terminal assumptions from the regression suites.
+
 ## v2.5.0 - Parallel streaming, interactive browser and query planner
 
 ### Performance and correctness

@@ -1,26 +1,40 @@
-.TH FASTFIND 1 "October 2026" "fastfind 2.5.0" "User Commands"
+.TH FASTFIND 1 "2026-10-24" "fastfind 2.5.0" "User Commands"
+.nh
 
 .SH NAME
-fastfind \\- blazing fast file search utility with fuzzy matching and git awareness
+fastfind, ff \- file search with fuzzy matching and git awareness
 
 .SH SYNOPSIS
 .B fastfind
-[\\fIOPTIONS\\fR] \\fIPATTERN\\fR [\\fIPATH\\fR ...]
+[\fIOPTIONS\fR] [\fIPATTERN\fR] [\fIPATH\fR ...]
 
+.PP
 .B fastfind
-"\\fInatural language query\\fR"
+"\fInatural language query\fR"
 
+.PP
 .B fastfind
---interactive
+\-\-interactive
+
+.PP
+.B ff
+[\fIOPTIONS\fR] [\fIPATTERN\fR] [\fIPATH\fR ...]
 
 .SH DESCRIPTION
 
-Fastfind is a high-performance file searching utility written in Nim, designed as a modern alternative to the traditional
+Fastfind is a high-performance file searching utility written in Nim, designed
+as a modern alternative to the traditional
 .B find
-command. It combines exceptional speed with a rich feature set including multiple pattern matching modes, flexible filtering, and git-aware searching.
+command. It combines exceptional speed with a rich feature set including
+multiple pattern matching modes, flexible filtering, and git-aware searching.
 
 .PP
-Fastfind uses an adaptive POSIX traversal engine. Small searches remain serial; larger trees use up to eight workers. Use -j 1 to force serial traversal or -j N to select a worker count. The key to its speed lies in avoiding unnecessary filesystem operations: pattern matching is performed before any stat calls, buffers are reused throughout execution, and output is batched to minimize system call overhead.
+Fastfind uses an adaptive POSIX traversal engine. Small searches remain
+serial; larger trees use up to eight workers. Use \-j 1 to force serial
+traversal or \-j N to select a worker count. The key to its speed lies in
+avoiding unnecessary filesystem operations: pattern matching is performed
+before any stat calls, buffers are reused throughout execution, and output is
+batched to minimize system call overhead.
 
 .SH GETTING STARTED
 
@@ -34,7 +48,9 @@ $ fastfind "config" .
 .fi
 
 .PP
-Patterns can be globs (default), regular expressions, fixed strings, or fuzzy matches. If no pattern is provided, fastfind matches everything - but the universal wildcard
+Patterns can be globs (default), regular expressions, fixed strings, or fuzzy
+matches. If no pattern is provided, fastfind matches everything - but the
+universal wildcard
 .B *
 is recommended for explicit matching:
 
@@ -45,33 +61,45 @@ $ fastfind "*" /home/user/documents
 
 .SH PERFORMANCE
 
-Fastfind implements several optimizations that make it significantly faster than traditional find for common use cases:
+Fastfind implements several optimizations that make it significantly faster
+than traditional find for common use cases:
 
-.IP "\fBUniversal wildcard fast path\fR" 4
+.TP
+.B Universal wildcard fast path
 When the pattern is
 .B *
-(meaning "match everything"), fastfind activates a special fast path that skips unnecessary matching logic entirely. This is the fastest possible mode.
+(meaning "match everything"), fastfind activates a special fast path that
+skips unnecessary matching logic entirely. This is the fastest possible mode.
 
-.IP "\fBPattern-before-stat ordering\fR" 4
-Fastfind evaluates the filename pattern before making any stat() system calls. Files that don't match the pattern never trigger a stat, saving significant syscall overhead on large directories.
+.TP
+.B Pattern-before-stat ordering
+Fastfind evaluates the filename pattern before making any stat() system calls.
+Files that don't match the pattern never trigger a stat, saving significant
+syscall overhead on large directories.
 
-.IP "\fBBuffered output\fR" 4
-Rather than writing each result individually, fastfind buffers output (256KB chunks) and writes in batches. This dramatically reduces write() system calls.
+.TP
+.B Buffered output
+Rather than writing each result individually, fastfind buffers output (256KB
+chunks) and writes in batches. This dramatically reduces write() system calls.
 
-.IP "\fBBuffer reuse\fR" 4
-Rather than allocating new strings for every path construction, fastfind reuses a single buffer throughout execution. This minimizes heap allocations in the hot path.
+.TP
+.B Buffer reuse
+Rather than allocating new strings for every path construction, fastfind
+reuses a single buffer throughout execution. This minimizes heap allocations
+in the hot path.
 
 .PP
 .B About parallel mode:
 Simple filename listing and counting adapt to the amount of work. Small trees
-finish serially; larger trees use up to eight workers. -j 1 forces serial
-execution and -j N selects up to 32 workers. Streaming output uses a bounded
+finish serially; larger trees use up to eight workers. \-j 1 forces serial
+execution and \-j N selects up to 32 workers. Streaming output uses a bounded
 64 KiB buffer per worker. Following symlinks and hierarchical Git ignore rules
 currently use serial traversal.
 
 .SH PATTERN MATCHING
 
-Fastfind supports multiple pattern matching modes, selected via command-line options:
+Fastfind supports multiple pattern matching modes, selected via command-line
+options:
 
 .SS Glob Matching (default)
 The default mode uses shell-style glob patterns:
@@ -79,18 +107,18 @@ The default mode uses shell-style glob patterns:
 .PP
 .nf
 $ fastfind "*.py"          # any .py file
-$ fastfind "*.c"           # any .c file  
+$ fastfind "*.c"           # any .c file
 $ fastfind "test*"         # anything starting with test
 $ fastfind "*config*"     # anything containing config
 .fi
 
 .SS Regular Expressions
-For more complex patterns, use POSIX-style regular expressions:
+For more complex patterns, use PCRE regular expressions:
 
 .PP
 .nf
-$ fastfind --regex "\\.py$"
-$ fastfind --regex "test_[0-9]+\\.rs"
+$ fastfind \-\-regex '\e.py$'
+$ fastfind \-\-regex 'test_[0\-9]+\e.rs'
 .fi
 
 .SS Fixed String Match
@@ -98,7 +126,7 @@ For exact substring matching without glob interpretation:
 
 .PP
 .nf
-$ fastfind --fixed "config"   # files containing "config" in name
+$ fastfind \-\-fixed "config"   # files containing "config" in name
 .fi
 
 .SS Fuzzy Matching
@@ -106,18 +134,21 @@ When you remember part of a filename but not exact spelling:
 
 .PP
 .nf
-$ fastfind --fuzzy confg       # finds "config", "configure", etc.
-$ fastfind --fuzzy srcfile    # finds "sourcefile", etc.
+$ fastfind \-\-fuzzy confg       # finds "config", "configure", etc.
+$ fastfind \-\-fuzzy srcfile    # finds "sourcefile", etc.
 .fi
 
 .SS Case Sensitivity
 By default, patterns are case-sensitive. Control this with:
 
-.IP "\fB-i, --ignore-case\fR" 4
+.TP
+.B \-i, \-\-ignore\-case
 Always case-insensitive matching.
 
-.IP "\fB--smart-case\fR" 4
-Case-insensitive by default, but switches to case-sensitive if the pattern contains uppercase letters. This is often the best choice.
+.TP
+.B \-\-smart\-case
+Case-insensitive by default, but switches to case-sensitive if the pattern
+contains uppercase letters. This is often the best choice.
 
 .SH TRAVERSAL OPTIONS
 
@@ -127,7 +158,7 @@ By default, fastfind does not show hidden files (those starting with dot):
 .PP
 .nf
 $ fastfind "*.py"             # exclude hidden files
-$ fastfind -H "*.py"         # include hidden files
+$ fastfind \-H "*.py"         # include hidden files
 .fi
 
 .SS Symbolic Links
@@ -135,7 +166,7 @@ To follow symbolic links during traversal:
 
 .PP
 .nf
-$ fastfind -L "*.so"          # follow symlinks
+$ fastfind \-L "*.so"          # follow symlinks
 .fi
 
 .SS Filesystem Boundaries
@@ -143,7 +174,7 @@ To stay within a single filesystem:
 
 .PP
 .nf
-$ fastfind -x "*.log"         # don't cross filesystem boundaries
+$ fastfind \-x "*.log"         # don't cross filesystem boundaries
 .fi
 
 .SS Depth Control
@@ -151,8 +182,8 @@ Limit how deep the search goes:
 
 .PP
 .nf
-$ fastfind "*" --max-depth 2   # max 2 levels deep
-$ fastfind "*" --min-depth 2   # at least 2 levels deep
+$ fastfind "*" \-\-max\-depth 2   # max 2 levels deep
+$ fastfind "*" \-\-min\-depth 2   # at least 2 levels deep
 .fi
 
 .SS Git Integration
@@ -160,8 +191,8 @@ Fastfind can respect .gitignore rules:
 
 .PP
 .nf
-$ fastfind "*.py" --gitignore    # respect repository ignore rules
-$ fastfind "*.py" --no-gitignore # do not use repository ignore rules (default)
+$ fastfind "*.py" \-\-gitignore    # respect repository ignore rules
+$ fastfind "*.py" \-\-no\-gitignore # do not use repository ignore rules (default)
 .fi
 
 .SH FILE FILTERS
@@ -169,14 +200,14 @@ $ fastfind "*.py" --no-gitignore # do not use repository ignore rules (default)
 Beyond filename matching, fastfind can filter by file properties:
 
 .SS File Type
-Filter by type using -t with codes f (file), d (directory), l (link):
+Filter by type using \-t with codes f (file), d (directory), l (link):
 
 .PP
 .nf
-$ fastfind -t d "config"      # directories named config
-$ fastfind -t f "*.c"          # regular .c files
-$ fastfind -t l "*.so"         # symbolic links
-$ fastfind -t fd "src"         # files AND directories
+$ fastfind \-t d "config"      # directories named config
+$ fastfind \-t f "*.c"          # regular .c files
+$ fastfind \-t l "*.so"         # symbolic links
+$ fastfind \-t fd "src"         # files AND directories
 .fi
 
 .SS File Size
@@ -184,10 +215,10 @@ Filter by size using expressions:
 
 .PP
 .nf
-$ fastfind "*" --size >10M     # larger than 10MB
-$ fastfind "*" --size <100K    # smaller than 100KB
-$ fastfind "*" --size =1GB     # exactly 1GB
-$ fastfind "*" --size 1K..10M  # between 1KB and 10MB
+$ fastfind "*" \-\-size '>10M'   # larger than 10MB
+$ fastfind "*" \-\-size '<100K'  # smaller than 100KB
+$ fastfind "*" \-\-size =1GB     # exactly 1GB
+$ fastfind "*" \-\-size 1K..10M  # between 1KB and 10MB
 .fi
 
 .SS Modification Time
@@ -195,10 +226,10 @@ Filter by modification time:
 
 .PP
 .nf
-$ fastfind "*" --recent               # modified in last 24h
-$ fastfind "*" --newer 2024-01-01      # modified after Jan 1, 2024
-$ fastfind "*" --older 30d             # older than 30 days
-$ fastfind "*" --changed 1w           # changed within last week
+$ fastfind "*" \-\-recent               # modified in last 24h
+$ fastfind "*" \-\-newer 2024\-01\-01      # modified after Jan 1, 2024
+$ fastfind "*" \-\-older 30d             # older than 30 days
+$ fastfind "*" \-\-changed 1w           # changed within last week
 .fi
 
 .SS Content Search
@@ -206,16 +237,16 @@ Search file contents (not filenames):
 
 .PP
 .nf
-$ fastfind "*.py" --contains "TODO"
-$ fastfind "*.js" --contains "export const"
-$ fastfind "*.nim" --contains-re "proc\\s+parse"
-$ fastfind "*" --contains TODO --max-bytes 10M
+$ fastfind "*.py" \-\-contains "TODO"
+$ fastfind "*.js" \-\-contains "export const"
+$ fastfind "*.nim" \-\-contains\-re 'proc\es+parse'
+$ fastfind "*" \-\-contains TODO \-\-max\-bytes 10M
 .fi
 
 Content search scans complete files by default. Use
-.B --max-bytes
+.B \-\-max\-bytes
 to impose a per-file cap, and
-.B --binary
+.B \-\-binary
 to permit files containing NUL bytes.
 
 .SS Extension Filter
@@ -223,7 +254,7 @@ Use a repeatable extension constraint independently of the name pattern:
 
 .PP
 .nf
-$ fastfind parser -E nim -E nims
+$ fastfind parser \-E nim \-E nims
 .fi
 
 .SS Exclusion Patterns
@@ -231,8 +262,8 @@ Exclude paths matching patterns:
 
 .PP
 .nf
-$ fastfind "*" --exclude "*test*"
-$ fastfind "*" --exclude "node_modules"
+$ fastfind "*" \-\-exclude "*test*"
+$ fastfind "*" \-\-exclude "node_modules"
 .fi
 
 .SH GIT FILTERS
@@ -241,10 +272,10 @@ When run in a git repository, fastfind can filter by git status:
 
 .PP
 .nf
-$ fastfind --git-modified   # modified but unstaged
-$ fastfind --git-untracked  # new files not in git
-$ fastfind --git-tracked    # files known to git
-$ fastfind --git-changed    # modified OR untracked
+$ fastfind \-\-git\-modified   # modified but unstaged
+$ fastfind \-\-git\-untracked  # new files not in git
+$ fastfind \-\-git\-tracked    # files known to git
+$ fastfind \-\-git\-changed    # modified OR untracked
 .fi
 
 .SH OUTPUT FORMATS
@@ -264,9 +295,9 @@ Show detailed information:
 
 .PP
 .nf
-$ fastfind -l "*.py"
--rw-r--r--  1234 2024-01-15 10:30 src/main.py
--rw-r--r--  5678 2024-01-16 14:22 src/utils/helpers.py
+$ fastfind \-l "*.py"
+\-rw\-r\-\-r\-\-  1234 2024\-01\-15 10:30 src/main.py
+\-rw\-r\-\-r\-\-  5678 2024\-01\-16 14:22 src/utils/helpers.py
 .fi
 
 .SS JSON Output
@@ -274,7 +305,7 @@ For scripting, structured formats:
 
 .PP
 .nf
-$ fastfind --json "*.py" | jq '.path'
+$ fastfind \-\-json "*.py" | jq '.[].path'
 .fi
 
 .SH SORTING
@@ -283,11 +314,11 @@ Sort results by various keys:
 
 .PP
 .nf
-$ fastfind "*" --sort name         # sort alphabetically
-$ fastfind "*" --sort size         # sort by size
-$ fastfind "*" --sort time        # sort by modification time
-$ fastfind "*" --sort path        # sort by path
-$ fastfind "*" --sort name -r     # reverse order
+$ fastfind "*" \-\-sort name         # sort alphabetically
+$ fastfind "*" \-\-sort size         # sort by size
+$ fastfind "*" \-\-sort time        # sort by modification time
+$ fastfind "*" \-\-sort path        # sort by path
+$ fastfind "*" \-\-sort name \-r     # reverse order
 .fi
 
 .SH ACTIONS
@@ -296,8 +327,8 @@ Execute commands on each match:
 
 .PP
 .nf
-$ fastfind "*.log" --exec "gzip {}"     # compress each log file
-$ fastfind "*.tmp" --exec "rm {}"       # delete temp files
+$ fastfind "*.log" \-\-exec "gzip {}"     # compress each log file
+$ fastfind "*.tmp" \-\-exec "rm {}"       # delete temp files
 .fi
 
 The {} placeholder is replaced with the file path.
@@ -313,7 +344,7 @@ $ fastfind "python files modified this week"
 $ fastfind "large log files bigger than 10MB"
 $ fastfind "text files containing 'TODO FIXME' under ~/projects excluding vendor"
 $ fastfind "images older than 30 days"
-$ fastfind --explain "rust files named parser larger than 5 KB sort newest limit 20"
+$ fastfind \-\-explain "rust files named parser larger than 5 KB sort newest limit 20"
 .fi
 
 Quoted phrases and path case are preserved. Compact clauses such as
@@ -324,8 +355,31 @@ Quoted phrases and path case are preserved. Compact clauses such as
 and
 .B limit:25
 may be mixed with conversational text. Use
-.B --explain
+.B \-\-explain
 to inspect the plan without running a search.
+
+.PP
+Use \-\-query TEXT to explicitly interpret a sentence.
+Explicit \-\-glob, \-\-regex and \-\-fixed patterns bypass automatic
+natural-language detection. The parser runs locally without a network service.
+
+.PP
+Supported clauses include file categories and languages, name prefixes,
+suffixes and alternatives, literal or regex content, content AND/OR, negative
+content, calendar dates, relative times, size ranges, paths, exclusions,
+written-number limits and sorting. Unrecognized words produce a name filter
+or a warning; arbitrary semantic understanding is not guaranteed.
+
+.PP
+.nf
+$ ff \-\-query 'ten largest PDF files in my downloads'
+$ ff \-\-query 'python files containing TODO and FIXME excluding vendor'
+$ ff \-\-query 'files modified yesterday without containing "secret key"'
+$ ff \-\-query 'files between one and five megabytes' \-\-explain
+.fi
+
+.PP
+\-\-not\-contains TEXT excludes files containing a literal phrase.
 
 .SH INDEXED SEARCH
 
@@ -336,15 +390,15 @@ replacement, so an interrupted refresh preserves the prior index.
 
 .PP
 .nf
-$ fastfind --rebuild-index ~/projects
-$ fastfind --update-index ~/projects
-$ fastfind --index-status
-$ fastfind --verify-index
-$ fastfind "*.nim" --use-index ~/projects
-$ fastfind "*.nim" --index-only ~/projects
+$ fastfind \-\-rebuild\-index ~/projects
+$ fastfind \-\-update\-index ~/projects
+$ fastfind \-\-index\-status
+$ fastfind \-\-verify\-index
+$ fastfind "*.nim" \-\-use\-index ~/projects
+$ fastfind "*.nim" \-\-index\-only ~/projects
 .fi
 
-.B --index-only
+.B \-\-index\-only
 returns an error rather than falling back when no compatible healthy index
 covers the requested roots. Legacy JSON indexes require one rebuild.
 
@@ -354,10 +408,11 @@ For exploratory searching, use interactive mode:
 
 .PP
 .nf
-$ fastfind --interactive
+$ fastfind \-\-interactive
 .fi
 
-This opens a terminal UI where you can type queries and see results update in real-time. Use arrow keys to navigate, Enter to select.
+This opens a terminal UI where you can type queries and see results update in
+real-time. Use arrow keys to navigate, Enter to select.
 
 .SH EXAMPLES
 
@@ -374,41 +429,41 @@ Find recently modified files:
 
 .PP
 .nf
-$ fastfind --recent
-$ fastfind --changed 1d
+$ fastfind \-\-recent
+$ fastfind \-\-changed 1d
 .fi
 
 Find and operate on files:
 
 .PP
 .nf
-$ fastfind "*.log" --exec "gzip {}"      # compress logs
-$ fastfind "*.bak" --exec "rm {}"        # remove backups
-$ fastfind -t d "node_modules" --exec "rm -rf {}"  # remove dirs
+$ fastfind "*.log" \-\-exec "gzip {}"      # compress logs
+$ fastfind "*.bak" \-\-exec "rm {}"        # remove backups
+$ fastfind \-t d "node_modules" \-\-exec "rm \-rf {}"  # remove dirs
 .fi
 
 Find files containing text:
 
 .PP
 .nf
-$ fastfind "*.py" --contains "TODO"
-$ fastfind "*.js" --contains "export default"
+$ fastfind "*.py" \-\-contains "TODO"
+$ fastfind "*.js" \-\-contains "export default"
 .fi
 
 Find large files:
 
 .PP
 .nf
-$ fastfind "*" --size >100M --sort size -r
+$ fastfind "*" \-\-size '>100M' \-\-sort size \-r
 .fi
 
 Use with other tools:
 
 .PP
 .nf
-$ fastfind -0 "*.py" | xargs -0 wc -l        # count lines safely
+$ fastfind \-0 "*.py" | xargs \-0 wc \-l        # count lines safely
 $ fastfind "*.rs" | rg "fn main"             # search content
-$ fastfind -0 "*.txt" | xargs -0 rm          # safe deletion
+$ fastfind \-0 "*.txt" | xargs \-0 rm          # safe deletion
 .fi
 
 .SH PERFORMANCE COMPARISON
@@ -417,12 +472,12 @@ Typical performance on large directory trees:
 
 .PP
 .nf
-# Simple recursive listing - fastfind excels here
+# Simple recursive listing \- fastfind excels here
 time fastfind "*" /path/to/large/tree   # ~0.5s
 time fd . /path/to/large/tree          # ~0.3s (reference)
 
-# With complex filtering - parallel mode may help
-time fastfind "*" /path -j 8 --contains "pattern"
+# With complex filtering \- parallel mode may help
+time fastfind "*" /path \-j 8 \-\-contains "pattern"
 .fi
 
 .SH ENVIRONMENT
@@ -455,16 +510,16 @@ No matches found.
 Error - invalid arguments, filesystem error, or other failure.
 .IP other 4
 When
-.B --exec
+.B \-\-exec
 or
-.B --exec-cmd
+.B \-\-exec\-cmd
 is used, a failing child command's exit status is propagated.
 
 .SH SAFETY
 
 When standard output is a terminal, control bytes in filenames are escaped so
 they cannot inject terminal sequences. Piped output remains byte-exact; use
-.B -0, --print0
+.B \-0, \-\-print0
 for unambiguous automation. Interactive deletion asks for confirmation and
 never recursively deletes directories. Followed directory symlinks are
 deduplicated by filesystem identity to prevent cycles.
@@ -481,7 +536,10 @@ https://github.com/RobertFlexx/fastfind/issues
 .BR find (1),
 .BR locate (1)
 
-Fastfind is similar to fd (rust) in spirit but written in Nim. For use cases where fd excels (complex filtering, better git integration), fd may be preferable. For simple recursive listing with globs, fastfind provides comparable or better performance.
+Fastfind is similar to fd (rust) in spirit but written in Nim. For use cases
+where fd excels (complex filtering, better git integration), fd may be
+preferable. For simple recursive listing with globs, fastfind provides
+comparable or better performance.
 
 .SH AUTHOR
 
@@ -491,23 +549,3 @@ Written by RobertFlexx.
 
 MIT License - see LICENSE file for details.
 https://github.com/RobertFlexx/fastfind/blob/main/LICENSE
-
-.SH NATURAL LANGUAGE QUERIES
-Use --query TEXT to explicitly interpret a sentence, and --explain to inspect
-its filters. Explicit --glob, --regex and --fixed patterns bypass automatic
-natural-language detection. The parser runs locally without a network service.
-.PP
-Supported clauses include file categories and languages, name prefixes,
-suffixes and alternatives, literal or regex content, content AND/OR, negative
-content, calendar dates, relative times, size ranges, paths, exclusions,
-written-number limits and sorting. Unrecognized words produce a name filter
-or a warning; arbitrary semantic understanding is not guaranteed.
-.PP
-.nf
-ff --query 'ten largest PDF files in my downloads'
-ff --query 'python files containing TODO and FIXME excluding vendor'
-ff --query 'files modified yesterday without containing "secret key"'
-ff --query 'files between one and five megabytes' --explain
-.fi
-.PP
---not-contains TEXT excludes files containing a literal phrase.

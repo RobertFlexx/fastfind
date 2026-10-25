@@ -770,7 +770,15 @@ Project docs:
 * Linux: full support
 * macOS: full support
 * BSD: full support
+* Solaris / illumos: POSIX source compatibility checks; native man-page CI on
+  Solaris 11.4 and OmniOS. Full CLI execution is not yet covered by native CI.
 * Windows: partial support (interactive/index behavior may differ)
+
+The manual uses classic `man` macros and ASCII roff source for BSD/macOS
+mandoc, Linux groff, and Solaris/illumos man/nroff. Both `ff.1` and
+`fastfind.1` contain the complete source. Run `nimble test_man` to check
+available formatters, or `sh tests/manpage_portability.sh` for a native smoke
+test without Python. See the [manual maintenance notes](mandoc/README.md).
 
 ## Contributing
 

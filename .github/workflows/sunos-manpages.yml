@@ -1,0 +1,53 @@
+name: Solaris and illumos man pages
+
+on:
+  push:
+    paths:
+      - 'mandoc/**'
+      - 'tests/manpage_*'
+      - '.github/workflows/sunos-manpages.yml'
+  pull_request:
+    paths:
+      - 'mandoc/**'
+      - 'tests/manpage_*'
+      - '.github/workflows/sunos-manpages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-man:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [solaris, illumos]
+    steps:
+      - name: Check out source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Check Solaris 11.4 man and nroff
+        if: matrix.os == 'solaris'
+        uses: vmactions/solaris-vm@1c166978f5a2c1f87f1c9d4d8dd85ae3d1eff6f7 # v1
+        with:
+          release: '11.4'
+          arch: x86_64
+          mem: 2048
+          cpu: 2
+          copyback: false
+          run: sh tests/manpage_portability.sh
+
+      - name: Check illumos man, mandoc and nroff (OmniOS LTS)
+        if: matrix.os == 'illumos'
+        uses: vmactions/omnios-vm@9576f0b6d15e7696548409baa533bc0a339caf42 # v1
+        with:
+          release: 'r151054'
+          arch: x86_64
+          mem: 2048
+          cpu: 2
+          copyback: false
+          run: sh tests/manpage_portability.sh

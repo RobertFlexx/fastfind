@@ -51,6 +51,11 @@ Docs-only contributions are welcome.
 
 When changing examples, prefer commands that users can run immediately without hidden assumptions.
 
+For manual changes, run `nimble test_man` (Python 3 and at least one of
+mandoc, groff, nroff, or man). CI requires all four commands on Linux and
+macOS and runs native man checks on BSD, Solaris, and illumos. Keep the
+[manual portability rules](mandoc/README.md) when adding markup or examples.
+
 ## Performance changes
 
 If a PR claims speed improvements, include benchmark details:

@@ -68,7 +68,11 @@ wide_parallel="$($bin -j 4 --count '*' "$fixture/wide")"
 [ "$($bin --count --limit 7 '*' "$fixture/wide")" = 7 ]
 
 # Following a directory cycle must terminate and must not duplicate forever.
-timeout 5 "$bin" --follow --limit 100 '*' "$fixture/tree" >/dev/null
+python3 - "$bin" "$fixture/tree" <<'PY'
+import subprocess, sys
+subprocess.run([sys.argv[1], '--follow', '--limit', '100', '*', sys.argv[2]],
+               check=True, stdout=subprocess.DEVNULL, timeout=5)
+PY
 
 # Metadata-backed output must contain the real size, not a zero placeholder.
 long_out="$($bin --long --fixed index.nim "$fixture/tree")"
@@ -93,14 +97,22 @@ PY
 # Compact index answers are equivalent and the file has the binary signature.
 export FASTFIND_INDEX="$fixture/test.ffidx"
 "$bin" --rebuild-index "$fixture/tree" >/dev/null
-[ "$(head -c 8 "$FASTFIND_INDEX")" = 'FFIDX004' ]
+python3 - "$FASTFIND_INDEX" <<'PY'
+import sys
+with open(sys.argv[1], 'rb') as index:
+    assert index.read(8) == b'FFIDX004'
+PY
 live_count="$($bin --count --extension nim '*' "$fixture/tree")"
 index_count="$($bin --use-index --count --extension nim '*' "$fixture/tree")"
 [ "$live_count" = "$index_count" ]
 [ "$index_count" = 3 ]
 
 # Corruption is rejected in index-only mode instead of silently succeeding.
-truncate -s 30 "$FASTFIND_INDEX"
+python3 - "$FASTFIND_INDEX" <<'PY'
+import sys
+with open(sys.argv[1], 'r+b') as index:
+    index.truncate(30)
+PY
 if "$bin" --use-index --index-only --fixed index.nim "$fixture/tree" >/dev/null 2>&1; then
   printf '%s\n' 'corrupt index was accepted' >&2
   exit 1

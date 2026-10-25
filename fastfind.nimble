@@ -40,6 +40,9 @@ task test, "Run CLI regression tests":
   exec "python3 tests/search_regression.py /tmp/fastfind-under-test"
   exec "python3 tests/interactive_regression.py /tmp/fastfind-under-test"
 
+task test_man, "Check portable man page source and available renderers":
+  exec "python3 tests/manpage_regression.py"
+
 task clean, "Remove build artifacts":
   exec "rm -rf bin/fastfind nimcache"
 

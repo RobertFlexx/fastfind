@@ -5,7 +5,8 @@ REPO="${REPO:-RobertFlexx/fastfind}"
 
 OVERRIDE_PREFIX="${PREFIX:-/usr/local}"
 OVERRIDE_BIN_DIR="${BIN_DIR:-${OVERRIDE_PREFIX}/bin}"
-OVERRIDE_MAN_DIR="${MAN_DIR:-${OVERRIDE_PREFIX}/share/man/man1}"
+# Let the shared installer choose the platform's default man hierarchy.
+OVERRIDE_MAN_DIR="${MAN_DIR:-}"
 OVERRIDE_REQUESTED_TAG="${REQUESTED_TAG:-}"
 
 INSTALL_LIB=""
@@ -160,7 +161,8 @@ INSTALL_MANPAGES=1
 
 PREFIX_EXPLICIT=1
 BIN_DIR_EXPLICIT=1
-MAN_DIR_EXPLICIT=1
+MAN_DIR_EXPLICIT=0
+[ -z "$MAN_DIR" ] || MAN_DIR_EXPLICIT=1
 
 update_main() {
   detect_platform

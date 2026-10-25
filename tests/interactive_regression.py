@@ -72,7 +72,14 @@ class Terminal:
             raise AssertionError('interactive mode hung')
         self.read(.05)
         assert self.proc.returncode == 0, (self.proc.returncode, self.output[-1000:])
-        assert termios.tcgetattr(self.slave) == self.before, 'terminal attributes were not restored'
+        after = termios.tcgetattr(self.slave)
+        before = self.before.copy()
+        # BSD kernels can set PENDIN while restoring canonical input. This
+        # transient flag requests retyping queued input at the next read.
+        pending = getattr(termios, 'PENDIN', 0)
+        before[3] &= ~pending
+        after[3] &= ~pending
+        assert after == before, 'terminal attributes were not restored'
         assert b'\x1b[?1049l' in self.output, 'alternate screen was not restored'
         assert b'\x1b[?2004l' in self.output, 'bracketed paste was not disabled'
         result = self.proc.stdout.read() if self.proc.stdout else b''
@@ -139,7 +146,7 @@ with tempfile.TemporaryDirectory(prefix='fastfind-tui-') as directory:
     terminal.finish()
 
     # Selecting into a pipe must keep all UI bytes on the terminal.
-    terminal = Terminal(root, piped=True)
+    terminal = Terminal(root, width=55, piped=True)
     terminal.send(b'/select me.txt\r')
     terminal.read(.2)
     terminal.send(b':rm\r')

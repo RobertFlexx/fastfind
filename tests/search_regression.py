@@ -38,12 +38,25 @@ def varint(value):
 with tempfile.TemporaryDirectory(prefix='fastfind-engine-') as directory:
     root = Path(directory) / 'tree'
     root.mkdir()
+    invalid_names = 0
+    content_matches = 0
     for i in range(24):
         child = root / f'dir{i:02}'
         child.mkdir()
         for name in ['file.nim', 'FILE.TXT', 'foo', 'bar', 'foobar', '.hidden',
                      'line\nbreak.txt', 'esc\x1b[2J.txt', '日本語.txt', 'bad\udcff.txt']:
-            (child / name).write_bytes(b'needle\n')
+            try:
+                (child / name).write_bytes(b'needle\n')
+            except OSError:
+                # APFS rejects invalid UTF-8; Linux/BSD still exercise the
+                # byte-preserving JSON path on filesystems that allow it.
+                if sys.platform != 'darwin' or name != 'bad\udcff.txt':
+                    raise
+                continue
+            if name == 'bad\udcff.txt':
+                invalid_names += 1
+            if not name.startswith('.'):
+                content_matches += 1
         (child / 'link').symlink_to('file.nim')
         os.mkfifo(child / 'pipe')
     (root / '.secret').mkdir()
@@ -64,12 +77,12 @@ with tempfile.TemporaryDirectory(prefix='fastfind-engine-') as directory:
         collected = json.loads(run('-j', '32', '--json', '--glob', '*', root))
         assert len(collected) == sum(paths(root, '-j', '1', '*').values())
         encoded = [entry for entry in collected if 'pathBytes' in entry]
-        assert len(encoded) == 24
+        assert len(encoded) == invalid_names
         assert all(b'bad\xff.txt' in base64.b64decode(entry['pathBytes']) for entry in encoded)
     assert len(paths(root, '--name', '--regex', '^file[.]nim$')) == 24
     assert len(paths(root, '--name', '--regex', '--full-match', 'foo|bar')) == 48
     for threads in ['1', '4', '8']:
-        assert int(run('-j', threads, '--count', '--contains', 'needle', '*', root)) == 216
+        assert int(run('-j', threads, '--count', '--contains', 'needle', '*', root)) == content_matches
         assert int(run('-j', threads, '--count', '--contains', 'needle', '--limit', '7', '*', root)) == 7
         assert len(paths(root, '-j', threads, '--limit', '7', '*')) == 7
         assert int(run('-j', threads, '--count', '--sort', 'name', '--limit', '7', '*', root)) == 7

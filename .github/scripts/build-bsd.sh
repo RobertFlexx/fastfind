@@ -10,6 +10,7 @@ esac
 pcre_archive="$prefix/lib/libpcre.a"
 test -f "$pcre_archive"
 nim --version
+sh tests/manpage_portability.sh
 mkdir -p dist
 binary="dist/ff-$platform-amd64"
 

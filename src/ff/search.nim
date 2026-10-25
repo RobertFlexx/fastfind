@@ -647,6 +647,14 @@ proc canUseSimplePathStream(cfg: Config): bool {.inline.} =
   cfg.extensions.len == 0
 
 when defined(posix):
+  # Solaris/illumos have DT_* declarations in some Nim versions, but no
+  # d_type member in struct dirent. Check the field as well as the constants.
+  # The override also lets native CI exercise the lstat-only traversal.
+  const HasDirentType = not defined(fastfindNoDType) and
+    compiles(default(Dirent).d_type) and
+    declared(DT_DIR) and declared(DT_REG) and declared(DT_LNK) and
+    declared(DT_UNKNOWN)
+
   type
     PosixStackEntry = object
       absPath: string
@@ -692,7 +700,7 @@ when defined(posix):
 
   proc direntKind(d: ptr Dirent; parentAbs: string;
                   name: cstring; nameLen: int): EntryType =
-    when declared(DT_DIR):
+    when HasDirentType:
       if d.d_type == DT_DIR: return etDir
       if d.d_type == DT_REG: return etFile
       if d.d_type == DT_LNK: return etLink
@@ -706,10 +714,9 @@ when defined(posix):
 
   proc direntIsRegular(d: ptr Dirent; parentAbs: string;
                        name: cstring; nameLen: int): bool =
-    when declared(DT_REG):
+    when HasDirentType:
       if d.d_type == DT_REG: return true
-      when declared(DT_UNKNOWN):
-        if d.d_type != DT_UNKNOWN: return false
+      if d.d_type != DT_UNKNOWN: return false
     var fullPath = newStringOfCap(parentAbs.len + nameLen + 1)
     fullPath.setJoinedPath(parentAbs, name, nameLen)
     isRegularFile(fullPath)
@@ -800,7 +807,7 @@ when defined(posix):
           if nameLen < 0: nameLen = direntNameLen(name)
           nameLen
 
-        let kindVal = when declared(DT_DIR):
+        let kindVal = when HasDirentType:
           if dent.d_type == DT_DIR: etDir
           elif dent.d_type == DT_REG: etFile
           elif dent.d_type == DT_LNK: etLink
@@ -875,7 +882,7 @@ when defined(posix):
           if nameLen < 0: nameLen = direntNameLen(name)
           nameLen
 
-        let kindVal = when declared(DT_DIR):
+        let kindVal = when HasDirentType:
           if dent.d_type == DT_DIR: etDir
           elif dent.d_type == DT_REG: etFile
           elif dent.d_type == DT_LNK: etLink
@@ -1110,7 +1117,7 @@ when defined(posix):
           if nameLen < 0: nameLen = direntNameLen(name)
           nameLen
 
-        let kindVal = when declared(DT_DIR):
+        let kindVal = when HasDirentType:
           if dent.d_type == DT_DIR: etDir
           elif dent.d_type == DT_REG: etFile
           elif dent.d_type == DT_LNK: etLink

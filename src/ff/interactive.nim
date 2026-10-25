@@ -831,7 +831,8 @@ proc drawPrompt(state: TUIState) =
   of modeGoto: prompt = " go / "; input = state.gotoPath
   of modeFilter: prompt = " Type: f file · d directory · l link · Enter all · Esc cancel"
   of modeConfirm:
-    prompt = safeDisplay(state.confirmAction & " " & state.confirmTarget) & "? y/n"
+    # Keep the response keys visible when a long path fills the prompt row.
+    prompt = "y/n: " & safeDisplay(state.confirmAction & " " & state.confirmTarget)
     color = ColorWarning
   if input.len > 0 or state.mode in {modeSearch, modeGlobalSearch, modeCommand, modeGoto}:
     let available = max(0, state.width - textWidth(prompt) - 2)
