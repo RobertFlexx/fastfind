@@ -1,6 +1,6 @@
 import std/[os, terminal, times as times, strutils, algorithm, re, sets]
 when compileOption("threads"): import std/[atomics, locks]
-import core, cli, search, fuzzy_match, matchers, tui_text, content, shellcmd, nlp
+import core, cli, search, fuzzy_match, matchers, tui_text, tui_input, content, shellcmd, nlp
 from ansi import terminalText
 
 when defined(posix):
@@ -1182,14 +1182,6 @@ proc executeCommand(state: var TUIState; cmd: string) =
   else:
     state.setMessage("Unknown command: " & parts[0], "error")
 
-type Key = object
-  kind: string
-  ch: char
-  text: string
-
-var pasteActive = false
-var pasteBuffer: string
-
 proc readByte(fd: cint; timeoutMs: int; ch: var char): int =
   when defined(posix):
     var descriptor = TPollfd(fd: fd, events: POLLIN)
@@ -1204,61 +1196,14 @@ proc readByte(fd: cint; timeoutMs: int; ch: var char): int =
     return 1
   else: -1
 
-proc readKey(fd: cint): Key =
+proc readKey(fd: cint; decoder: var InputDecoder): TerminalKey =
   var ch: char
-  let status = readByte(fd, 100, ch)
-  if status < 0: return Key(kind: "eof")
-  if status == 0: return Key(kind: "none")
-  if pasteActive:
-    while true:
-      pasteBuffer.add(ch)
-      if pasteBuffer.endsWith("\x1b[201~"):
-        pasteActive = false
-        pasteBuffer.setLen(pasteBuffer.len - 6)
-        result = Key(kind: "paste", text: safeDisplay(pasteBuffer).replace("\\x0a", " ").replace("\\x0d", " "))
-        pasteBuffer.setLen(0)
-        return
-      # Retain a bounded prefix and enough trailing bytes to detect the end.
-      if pasteBuffer.len > 65542: pasteBuffer.delete(65536..65536)
-      let next = readByte(fd, 20, ch)
-      if next < 0: return Key(kind: "eof")
-      if next == 0: return Key(kind: "none")
-  if ch == '\x1b':
-    var sequence = ""
-    if readByte(fd, 35, ch) <= 0: return Key(kind: "escape")
-    if ch notin {'[', 'O'}: return Key(kind: "escape")
-    for i in 0..<32:
-      if readByte(fd, 35, ch) <= 0: return Key(kind: "escape")
-      sequence.add(ch)
-      if ch in {'@'..'~'}: break
-    case sequence
-    of "A": return Key(kind: "up")
-    of "B": return Key(kind: "down")
-    of "C": return Key(kind: "right")
-    of "D": return Key(kind: "left")
-    of "H", "1~", "7~": return Key(kind: "home")
-    of "F", "4~", "8~": return Key(kind: "end")
-    of "5~": return Key(kind: "pageup")
-    of "6~": return Key(kind: "pagedown")
-    of "3~": return Key(kind: "delete")
-    of "200~":
-      pasteActive = true
-      pasteBuffer.setLen(0)
-      return Key(kind: "none")
-    else: return Key(kind: "unknown")
-  case ch
-  of '\r', '\n': Key(kind: "enter")
-  of '\t': Key(kind: "tab")
-  of '\x7f', '\b': Key(kind: "backspace")
-  of '\x03': Key(kind: "ctrl-c")
-  of '\x04': Key(kind: "ctrl-d")
-  of '\x15': Key(kind: "ctrl-u")
-  of '\x17': Key(kind: "ctrl-w")
-  of '\x12': Key(kind: "ctrl-r")
-  of ' ': Key(kind: "space", ch: ch)
-  else:
-    if ch >= ' ' and ch != '\x7f': Key(kind: "char", ch: ch)
-    else: Key(kind: "unknown")
+  while true:
+    let status = readByte(fd, decoder.timeoutMs(), ch)
+    if status < 0: return TerminalKey(kind: "eof")
+    if status == 0: return decoder.expire()
+    result = decoder.feed(ch)
+    if result.kind != "none" or not decoder.readingControl(): return
 
 proc runInteractive*(cfg: Config) =
   let stdinFd = cint(getFileHandle(stdin))
@@ -1298,6 +1243,7 @@ proc runInteractive*(cfg: Config) =
   loadDirectory(state)
 
   var showingBookmarks = false
+  var inputDecoder: InputDecoder
   var dirty = true
   var lastWidth = 0
   var lastHeight = 0
@@ -1321,7 +1267,7 @@ proc runInteractive*(cfg: Config) =
         flushScreen()
       dirty = false
 
-    let key = readKey(stdinFd)
+    let key = readKey(stdinFd, inputDecoder)
     if key.kind != "none": dirty = true
     if key.kind in ["eof", "ctrl-c"]:
       state.running = false

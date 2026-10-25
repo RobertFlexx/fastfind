@@ -12,6 +12,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
     strategy:
+      fail-fast: false
       matrix:
         runner: [ubuntu-24.04, macos-15]
         threads: ["on", "off"]
@@ -43,6 +44,7 @@ jobs:
           fi
           nim c -r --mm:orc --threads:${{ matrix.threads }} --outdir:/tmp tests/test_nlp.nim
           nim c -r --mm:orc --threads:${{ matrix.threads }} --outdir:/tmp tests/test_engine.nim
+          nim c -r --mm:orc --threads:${{ matrix.threads }} --outdir:/tmp tests/test_tui_input.nim
 
       - name: Run CLI regression tests
         run: |

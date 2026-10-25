@@ -8,7 +8,9 @@ MANPAGER='cat'
 MANOPT=
 MANROFFOPT=
 GROFF_NO_SGR=1
-export LC_ALL TERM PAGER MANPAGER MANOPT MANROFFOPT GROFF_NO_SGR
+COLUMNS=80
+MANWIDTH=80
+export LC_ALL TERM PAGER MANPAGER MANOPT MANROFFOPT GROFF_NO_SGR COLUMNS MANWIDTH
 
 page="${1:-mandoc/ff.1}"
 fixture="$(mktemp -d "${TMPDIR:-/tmp}/fastfind-man.XXXXXX")"
@@ -18,18 +20,31 @@ mkdir "$fixture/man1"
 cp "$page" "$fixture/man1/ff.1"
 cp "$page" "$fixture/man1/fastfind.1"
 
+contains_text() {
+  # System V /usr/bin/grep lacks -F and -e. Pass literals through the
+  # environment so awk does not reinterpret regexes or backslash escapes.
+  FF_MAN_TEXT="$1" awk 'index($0, ENVIRON["FF_MAN_TEXT"]) { found = 1 }
+    END { exit !found }' "$fixture/plain"
+}
+
 check_output() {
   col -b < "$fixture/rendered" > "$fixture/plain"
   for artifact in '\-' '\fB' '\fI' '\fR' '\e'; do
-    if grep -F -e "$artifact" "$fixture/plain"; then
+    if contains_text "$artifact"; then
       printf 'rendering artifact in %s\n' "$1" >&2
       exit 1
     fi
   done
-  grep -F 'fastfind, ff - file search' "$fixture/plain" > /dev/null
-  grep -F 'fastfind [OPTIONS] [PATTERN] [PATH ...]' "$fixture/plain" > /dev/null
-  grep -F -e "--regex '\.py\$'" "$fixture/plain" > /dev/null
-  grep -F 'https://github.com/RobertFlexx/fastfind/blob/main/LICENSE' "$fixture/plain" > /dev/null
+  for expected in 'fastfind, ff - file search' \
+    'fastfind [OPTIONS] [PATTERN] [PATH ...]' \
+    "--regex '\.py\$'" \
+    'https://github.com/RobertFlexx/fastfind/blob/main/LICENSE'; do
+    if ! contains_text "$expected"; then
+      printf 'missing rendered text in %s: %s\n' "$1" "$expected" >&2
+      cat "$fixture/plain" >&2
+      exit 1
+    fi
+  done
   printf 'PASS: %s\n' "$1"
 }
 

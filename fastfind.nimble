@@ -36,6 +36,7 @@ task test, "Run CLI regression tests":
   exec "nim c --nimcache:nimcache/test-cli --mm:orc --threads:on -d:release --opt:speed -o:/tmp/fastfind-under-test src/ff.nim"
   exec "nim c -r --nimcache:nimcache/test-nlp --mm:orc --threads:on -o:/tmp/fastfind-test-nlp tests/test_nlp.nim"
   exec "nim c -r --nimcache:nimcache/test-engine --mm:orc --threads:on -o:/tmp/fastfind-test-engine tests/test_engine.nim"
+  exec "nim c -r --nimcache:nimcache/test-tui-input --mm:orc --threads:on -o:/tmp/fastfind-test-tui-input tests/test_tui_input.nim"
   exec "bash tests/cli_regression.sh /tmp/fastfind-under-test"
   exec "python3 tests/search_regression.py /tmp/fastfind-under-test"
   exec "python3 tests/interactive_regression.py /tmp/fastfind-under-test"

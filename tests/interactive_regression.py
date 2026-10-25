@@ -123,6 +123,11 @@ with tempfile.TemporaryDirectory(prefix='fastfind-tui-') as directory:
         terminal.send(part)
         time.sleep(.005)
     terminal.read(.1)
+    # A scheduling delay after CSI must not turn its final B into Bookmarks.
+    terminal.send(b'\x1b[')
+    time.sleep(.08)
+    terminal.send(b'B')
+    assert b'Bookmarks' not in terminal.read(.15)
     for width, height in [(40, 10), (5, 3), (110, 28)]:
         terminal.resize(width, height)
         terminal.read(.2)

@@ -30,7 +30,7 @@ fi
 
 # Native execution catches ABI, threading, filesystem and regex issues that
 # cross-compilation alone cannot establish.
-for suite in test_nlp test_engine; do
+for suite in test_nlp test_engine test_tui_input; do
   nim c -r --mm:orc --threads:on -d:usePcreHeader "--cc:$compiler" \
     --passC:-Wno-error=incompatible-pointer-types \
     "--passC:-I$prefix/include" "--passL:$pcre_archive" \

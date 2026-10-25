@@ -12,6 +12,10 @@
   interactive confirmation keys visible when paths fill the prompt row.
 - Preserve platform-specific man directories when updating; remove GNU-only
   utilities and filesystem/terminal assumptions from the regression suites.
+- Keep standalone URLs intact across classic formatters, remove fill-mode
+  blank lines rejected by current mandoc, and avoid System V grep extensions.
+- Decode fragmented terminal controls with a persistent parser so delayed
+  arrow bytes cannot open Bookmarks; bound bracketed paste to 64 KiB.
 
 ## v2.5.0 - Parallel streaming, interactive browser and query planner
 
